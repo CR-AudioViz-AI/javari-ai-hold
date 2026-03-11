@@ -17,10 +17,17 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
-  process.env.SUPABASE_SERVICE_ROLE_KEY || ''
-)
+// ═══════════════════════════════════════════════════════════════════════════════
+// CI BUILD GUARD - Prevent Supabase init during GitHub Actions builds
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL || ''
+const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || ''
+const HAS_SUPABASE_CONFIG = !!(SUPABASE_URL && SUPABASE_KEY)
+
+const supabase = HAS_SUPABASE_CONFIG 
+  ? createClient(SUPABASE_URL, SUPABASE_KEY)
+  : null
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TYPES
@@ -103,6 +110,16 @@ async function createAlert(
   data: any,
   source?: string
 ): Promise<Alert> {
+  if (!supabase) {
+    return {
+      alert_type: alertType,
+      severity: 'info',
+      title: 'Alert system unavailable',
+      message: 'Supabase not configured',
+      acknowledged: false
+    }
+  }
+
   const rule = ALERT_RULES[alertType]
   
   const alert: Alert = {
@@ -173,6 +190,8 @@ async function sendUrgentNotification(alert: Alert): Promise<void> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function runSystemChecks(): Promise<Alert[]> {
+  if (!supabase) return []
+  
   const alerts: Alert[] = []
   
   // Check for recent deployment failures (mock - would connect to Vercel API)
@@ -232,6 +251,8 @@ async function getAlerts(options: {
   severity?: string
   limit?: number
 }): Promise<Alert[]> {
+  if (!supabase) return []
+  
   let query = supabase
     .from('proactive_alerts')
     .select('*')
@@ -258,6 +279,8 @@ async function getAlerts(options: {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function acknowledgeAlert(id: string, acknowledgedBy: string): Promise<void> {
+  if (!supabase) return
+  
   await supabase
     .from('proactive_alerts')
     .update({
@@ -269,6 +292,8 @@ async function acknowledgeAlert(id: string, acknowledgedBy: string): Promise<voi
 }
 
 async function acknowledgeAll(acknowledgedBy: string): Promise<number> {
+  if (!supabase) return 0
+  
   const { data } = await supabase
     .from('proactive_alerts')
     .update({
@@ -287,6 +312,14 @@ async function acknowledgeAll(acknowledgedBy: string): Promise<number> {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export async function POST(request: NextRequest) {
+  // CI BUILD GUARD - Return early if Supabase not configured
+  if (!HAS_SUPABASE_CONFIG) {
+    return NextResponse.json({ 
+      ok: true, 
+      message: 'Alerts service unavailable (build mode)'
+    }, { status: 200 })
+  }
+
   try {
     const body = await request.json()
     const { action, data } = body
@@ -329,6 +362,15 @@ export async function POST(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
+  // CI BUILD GUARD - Return empty alerts if Supabase not configured
+  if (!HAS_SUPABASE_CONFIG) {
+    return NextResponse.json({
+      ok: true,
+      alerts: [],
+      message: 'Alerts service unavailable (build mode)'
+    }, { status: 200 })
+  }
+
   const { searchParams } = new URL(request.url)
   const acknowledged = searchParams.get('acknowledged')
   const severity = searchParams.get('severity')

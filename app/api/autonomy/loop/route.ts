@@ -44,6 +44,16 @@ export async function GET() {
     return NextResponse.json({ status: 'maintain_mode', message: 'System in MAINTAIN mode — no execution', mode })
   }
 
+
+  // Heartbeat: write to javari_jobs on EVERY cycle so Vercel cron execution is provable
+  supabase.from('javari_jobs').insert({
+    task: 'cron_heartbeat', priority: 'low', status: 'complete',
+    dry_run: false, triggered_by: 'cron_build_loop',
+    metadata: { mode, cycle_start: cycleStart },
+    started_at: new Date(cycleStart).toISOString(),
+    completed_at: new Date(cycleStart).toISOString(),
+    result: { heartbeat: true, note: 'written every cron cycle regardless of tasks' },
+  }) // fire-and-forget — proves cron fired even when loop returns idle
   // Budget gate
   const spent = await getDailySpend()
   if (spent >= DAILY_BUDGET) {

@@ -23,5 +23,6 @@
       "path": "/api/autonomy/pr-merge",
       "schedule": "*/3 * * * *"
     }
-  ]
+  ],
+  "_cron_supersede": "supersede-old-crons-1773615339"
 }

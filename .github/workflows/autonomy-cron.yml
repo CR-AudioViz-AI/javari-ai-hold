@@ -1,7 +1,7 @@
 # .github/workflows/autonomy-cron.yml
 # Javari AI Autonomy Scheduler — GitHub Actions fallback
-# Fires endpoints when Vercel crons are disabled or insufficient.
-# Saturday, March 14, 2026
+# Fixed: removed invalid % operator from if expressions
+# Sunday, March 15, 2026
 
 name: Javari Autonomy Scheduler
 
@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       endpoint:
-        description: 'Endpoint'
+        description: 'Endpoint to trigger'
         required: false
         default: 'all'
         type: choice
@@ -22,63 +22,86 @@ env:
 
 jobs:
   autonomy-loop:
-    name: Autonomy Loop (every 2 min)
+    name: Autonomy Loop
     runs-on: ubuntu-latest
     timeout-minutes: 3
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.inputs.endpoint == 'all' ||
+      github.event.inputs.endpoint == 'loop'
     steps:
       - name: Trigger /api/autonomy/loop
         run: |
           echo "Triggering autonomy loop at $(date -u)"
-          curl -sf -X GET "${{ env.JAVARI_BASE }}/api/autonomy/loop" \
+          HTTP=$(curl -s -o /tmp/loop.json -w "%{http_code}" \
+            -X GET "${{ env.JAVARI_BASE }}/api/autonomy/loop" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "User-Agent: JavariGHA/1.0" --max-time 25 \
-            -o /tmp/loop.json && cat /tmp/loop.json | head -c 300 \
-            || echo "Loop returned non-2xx (may be rate limited)"
+            -H "User-Agent: JavariGHA/1.0" \
+            --max-time 25)
+          echo "HTTP $HTTP"
+          cat /tmp/loop.json | head -c 500 || true
+          if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
+            echo "SUCCESS: autonomy loop triggered"
+          else
+            echo "WARNING: loop returned HTTP $HTTP"
+          fi
 
   pr-workflow:
-    name: PR Workflow (every 5th run ≈ 10 min)
+    name: PR Workflow
     runs-on: ubuntu-latest
     timeout-minutes: 4
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.run_number % 5 == 0)
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.inputs.endpoint == 'all' ||
+      github.event.inputs.endpoint == 'pr-workflow'
     steps:
       - name: Trigger /api/autonomy/pr-workflow
         run: |
-          curl -sf -X GET "${{ env.JAVARI_BASE }}/api/autonomy/pr-workflow" \
+          echo "Triggering pr-workflow at $(date -u)"
+          HTTP=$(curl -s -o /tmp/pw.json -w "%{http_code}" \
+            -X GET "${{ env.JAVARI_BASE }}/api/autonomy/pr-workflow" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "User-Agent: JavariGHA/1.0" --max-time 55 \
-            -o /tmp/pw.json && cat /tmp/pw.json | head -c 300 \
-            || echo "PR-workflow non-2xx"
+            -H "User-Agent: JavariGHA/1.0" \
+            --max-time 55)
+          echo "HTTP $HTTP"
+          cat /tmp/pw.json | head -c 500 || true
 
   pr-merge:
-    name: PR Merge (every 3rd run ≈ 6 min)
+    name: PR Merge
     runs-on: ubuntu-latest
     timeout-minutes: 3
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.run_number % 3 == 0)
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.inputs.endpoint == 'all' ||
+      github.event.inputs.endpoint == 'pr-merge'
     steps:
       - name: Trigger /api/autonomy/pr-merge
         run: |
-          curl -sf -X GET "${{ env.JAVARI_BASE }}/api/autonomy/pr-merge" \
+          echo "Triggering pr-merge at $(date -u)"
+          HTTP=$(curl -s -o /tmp/pm.json -w "%{http_code}" \
+            -X GET "${{ env.JAVARI_BASE }}/api/autonomy/pr-merge" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "User-Agent: JavariGHA/1.0" --max-time 25 \
-            -o /tmp/pm.json && cat /tmp/pm.json | head -c 300 \
-            || echo "PR-merge non-2xx"
+            -H "User-Agent: JavariGHA/1.0" \
+            --max-time 25)
+          echo "HTTP $HTTP"
+          cat /tmp/pm.json | head -c 500 || true
 
   scanner:
-    name: Scanner (every 5th run ≈ 10 min)
+    name: Scanner
     runs-on: ubuntu-latest
     timeout-minutes: 4
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.run_number % 5 == 1)
+    if: >
+      github.event_name == 'schedule' ||
+      github.event.inputs.endpoint == 'all' ||
+      github.event.inputs.endpoint == 'scan'
     steps:
       - name: Trigger /api/autonomy/scan
         run: |
-          curl -sf -X GET "${{ env.JAVARI_BASE }}/api/autonomy/scan" \
+          echo "Triggering scan at $(date -u)"
+          HTTP=$(curl -s -o /tmp/sc.json -w "%{http_code}" \
+            -X GET "${{ env.JAVARI_BASE }}/api/autonomy/scan" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            -H "User-Agent: JavariGHA/1.0" --max-time 55 \
-            -o /tmp/sc.json && cat /tmp/sc.json | head -c 300 \
-            || echo "Scanner non-2xx"
+            -H "User-Agent: JavariGHA/1.0" \
+            --max-time 55)
+          echo "HTTP $HTTP"
+          cat /tmp/sc.json | head -c 500 || true

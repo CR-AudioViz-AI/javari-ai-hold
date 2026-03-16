@@ -71,10 +71,11 @@ export async function GET() {
     if (currentSpend >= DAILY_BUDGET) break
 
     // Fetch next task — BUILD mode prioritises roadmap_master source
+    // taskQuery retained for reference — actual fetch is via waterfall below
     let taskQuery = supabase
       .from('roadmap_tasks')
       .select('id, title, description, phase_id, metadata')
-      .eq('status', 'pending')
+      .in('status', ['pending', 'retry'])
       .order('id', { ascending: true })
       .limit(1)
 
@@ -85,11 +86,12 @@ export async function GET() {
       : ['javari_scanner', 'planner']
     let tasks: { id: string; title: string; description: string | null; phase_id: string | null; metadata: Record<string, unknown> | null }[] | null = null
 
+    // Claim pending OR retry tasks — retry tasks re-enter the queue after failure
     for (const src of sourcePriority) {
       const { data } = await supabase
         .from('roadmap_tasks')
         .select('id, title, description, phase_id, metadata')
-        .eq('status', 'pending')
+        .in('status', ['pending', 'retry'])
         .eq('source', src)
         .order('id', { ascending: true })
         .limit(1)
@@ -109,7 +111,7 @@ export async function GET() {
     const taskType = (meta.task_type as string) ?? detectType(task.title + ' ' + (task.description ?? ''))
 
     await supabase.from('roadmap_tasks')
-      .update({ status: 'running', updated_at: Date.now() })
+      .update({ status: 'in_progress', updated_at: Date.now() })
       .eq('id', task.id)
 
     let taskResult: unknown = null
@@ -185,7 +187,7 @@ export async function GET() {
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       await supabase.from('roadmap_tasks')
-        .update({ status: 'pending', error: msg, updated_at: Date.now() })
+        .update({ status: 'retry', error: msg, updated_at: Date.now() })
         .eq('id', task.id)
       taskResult = { roadmap_task_id: task.id, title: task.title, error: msg }
     }

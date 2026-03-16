@@ -78,14 +78,29 @@ export async function GET() {
       .order('id', { ascending: true })
       .limit(1)
 
-    if (taskSource) {
-      taskQuery = taskQuery.eq('source', taskSource)
+    // Source priority waterfall: roadmap_master → javari_scanner → planner
+    // Try each source in order until a task is found or all queues empty
+    const sourcePriority = taskSource
+      ? [taskSource, 'javari_scanner', 'planner']
+      : ['javari_scanner', 'planner']
+    let tasks: { id: string; title: string; description: string | null; phase_id: string | null; metadata: Record<string, unknown> | null }[] | null = null
+
+    for (const src of sourcePriority) {
+      const { data } = await supabase
+        .from('roadmap_tasks')
+        .select('id, title, description, phase_id, metadata')
+        .eq('status', 'pending')
+        .eq('source', src)
+        .order('id', { ascending: true })
+        .limit(1)
+      if (data?.length) {
+        tasks = data
+        break
+      }
     }
 
-    const { data: tasks } = await taskQuery
     if (!tasks?.length) {
-      // If BUILD mode and no roadmap_master tasks, try any pending
-      if (mode === 'BUILD') break
+      // All source queues empty — genuinely idle
       break
     }
 

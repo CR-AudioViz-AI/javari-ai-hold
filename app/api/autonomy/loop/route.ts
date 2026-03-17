@@ -4,7 +4,7 @@
 //   BUILD: pulls from roadmap_tasks WHERE source='roadmap_master' first, then any pending/retry
 //   SCAN:  standard queue execution
 //   MAINTAIN: no-op
-// Monday, March 16, 2026 — increased throughput to MAX_TASKS_PER_LOOP=10
+// Monday, March 16, 2026 — MAX_TASKS_PER_LOOP=10, concurrent execution via Promise.allSettled
 import { NextResponse }  from 'next/server'
 import { createClient }  from '@supabase/supabase-js'
 import { route }         from '@/lib/javari/model-router'
@@ -103,20 +103,16 @@ export async function GET() {
     })
   }
 
-  // Process each task (up to maxPerRun budget-gated)
-  for (const task of taskBatch.slice(0, maxPerRun)) {
-    const currentSpend = await getDailySpend()
-    if (currentSpend >= DAILY_BUDGET) break
+  // Claim all tasks atomically: pending/retry → in_progress
+  const batch = taskBatch.slice(0, maxPerRun)
+  await supabase.from('roadmap_tasks')
+    .update({ status: 'in_progress', updated_at: Date.now() })
+    .in('id', batch.map(t => t.id))
 
+  // Execute all tasks concurrently — parallel AI calls, ~5s total vs 10×5s=50s sequential
+  const taskPromises = batch.map(async (task) => {
     const meta     = (task.metadata ?? {}) as Record<string, unknown>
     const taskType = (meta.task_type as string) ?? detectType(task.title + ' ' + (task.description ?? ''))
-
-    // Claim: pending/retry → in_progress
-    await supabase.from('roadmap_tasks')
-      .update({ status: 'in_progress', updated_at: Date.now() })
-      .eq('id', task.id)
-
-    let taskResult: unknown = null
     try {
       const prompt = [
         `Task: ${task.title}`,
@@ -137,11 +133,10 @@ export async function GET() {
       })
 
       if (result.blocked) {
-        // Blocked → back to pending (not retry — blocker may resolve)
         await supabase.from('roadmap_tasks')
           .update({ status: 'pending', error: result.reason, updated_at: Date.now() })
           .eq('id', task.id)
-        break
+        return null
       }
 
       // in_progress → completed
@@ -183,8 +178,8 @@ export async function GET() {
           .eq('status', 'pending')
       }
 
-      taskResult = { roadmap_task_id: task.id, title: task.title, task_type: taskType,
-                     model: result.model, cost: result.cost, job_id: job?.id }
+      return { roadmap_task_id: task.id, title: task.title, task_type: taskType,
+               model: result.model, cost: result.cost, job_id: job?.id }
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -192,10 +187,13 @@ export async function GET() {
       await supabase.from('roadmap_tasks')
         .update({ status: 'retry', error: msg, updated_at: Date.now() })
         .eq('id', task.id)
-      taskResult = { roadmap_task_id: task.id, title: task.title, error: msg }
+      return { roadmap_task_id: task.id, title: task.title, error: msg }
     }
+  })
 
-    if (taskResult) executed.push(taskResult)
+  const results = await Promise.allSettled(taskPromises)
+  for (const r of results) {
+    if (r.status === 'fulfilled' && r.value) executed.push(r.value)
   }
 
   const finalSpend = await getDailySpend()

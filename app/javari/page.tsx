@@ -185,6 +185,7 @@ export default function JavariOSPage() {
   const [execPulse,   setExecPulse]   = useState(false)
 
   const bottomRef  = useRef<HTMLDivElement>(null)
+  const feedRef    = useRef<HTMLDivElement>(null)
   const textRef    = useRef<HTMLTextAreaElement>(null)
 
   // Auto-scroll chat
@@ -510,111 +511,161 @@ export default function JavariOSPage() {
           </Q>
 
           {/* ── Q2: CHAT ────────────────────────────────────── top-right ── */}
-          <Q id="q2" label="Q2 · CHAT INTERFACE" tag={`/${mode.toUpperCase()}`} glow="blue"
+          <Q id="q2" label="Q2 · LIVE FEED" tag={`/${mode.toUpperCase()}`} glow="blue"
             className="order-1 md:order-2 min-h-[50vh] md:min-h-0">
             <div className="h-full flex flex-col">
 
-              {/* Message history */}
-              <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3 min-h-0">
-                {!hasChat && (
-                  <div className="h-full flex flex-col items-center justify-center gap-4 text-center select-none">
-                    <p className="font-mono text-[10px] tracking-[0.3em] text-zinc-700 uppercase">Ready</p>
-                    <div className="flex flex-wrap gap-1.5 justify-center max-w-xs">
-                      {PROMPTS.map(p => (
-                        <button key={p} onClick={() => send(p)}
-                          className="px-2.5 py-1.5 font-mono text-[10px] text-zinc-600 bg-zinc-900/60 border border-zinc-800/60 rounded-md hover:border-blue-800/50 hover:text-blue-400 hover:bg-blue-950/20 transition-all tracking-wider">
-                          {p}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {messages.map(msg => {
-                  if (msg.role === 'system') {
-                    return (
-                      <div key={msg.id} className="flex justify-center">
-                        <span className="font-mono text-[9px] text-zinc-700 tracking-widest">{msg.content}</span>
-                      </div>
-                    )
-                  }
-                  const isUser  = msg.role === 'user'
-                  const agentCfg = msg.agent ? AGENT_CFG[msg.agent] : null
-                  return (
-                    <div key={msg.id} className={`flex gap-2 ${isUser ? 'flex-row-reverse' : ''}`}>
-                      {/* Glyph */}
-                      <div className="flex-shrink-0 w-6 h-6 mt-0.5 flex items-center justify-center rounded font-mono text-sm"
-                        style={{ color: agentCfg?.hue ?? (isUser ? '#71717a' : '#a855f7') }}>
-                        {isUser ? '▸' : agentCfg ? agentCfg.glyph : '◉'}
-                      </div>
-                      <div className={`flex flex-col gap-1 max-w-[82%] ${isUser ? 'items-end' : 'items-start'}`}>
-                        {agentCfg && (
-                          <span className="font-mono text-[9px] tracking-[0.2em]"
-                            style={{ color: agentCfg.hue }}>{agentCfg.label}</span>
-                        )}
-                        <div className={`px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words rounded-lg ${
-                          isUser
-                            ? 'bg-zinc-800 text-zinc-100 rounded-tr-none'
-                            : msg.error
-                              ? 'bg-red-950/40 text-red-400 border border-red-900/40 rounded-tl-none'
-                              : agentCfg
-                                ? 'bg-zinc-900/60 text-zinc-200 border border-zinc-800/40 rounded-tl-none'
-                                : 'bg-zinc-900/60 text-zinc-100 border border-zinc-800/30 rounded-tl-none'
-                        }`}>
-                          {msg.content}
-                        </div>
-                        {msg.model && (
-                          <span className="font-mono text-[9px] text-zinc-700 px-1">{msg.model.split('-').slice(-2).join('-')}</span>
-                        )}
-                      </div>
-                    </div>
-                  )
-                })}
-
-                {/* Typing indicator */}
-                {loading && (
-                  <div className="flex gap-2">
-                    <div className="w-6 h-6 flex items-center justify-center text-violet-500 font-mono">◉</div>
-                    <div className="bg-zinc-900/60 border border-zinc-800/30 rounded-lg rounded-tl-none px-3 py-2 flex items-center gap-1.5">
-                      {[0,1,2].map(i => (
-                        <div key={i} className="w-1.5 h-1.5 bg-blue-500 rounded-full animate-bounce"
-                          style={{ animationDelay: `${i * 0.15}s` }} />
-                      ))}
-                      <span className="font-mono text-[9px] text-zinc-700 ml-1">
-                        {mode === 'council' ? 'COUNCIL…' : 'JAVARI…'}
-                      </span>
-                    </div>
-                  </div>
-                )}
-                <div ref={bottomRef} />
-              </div>
-
-              {/* Input bar */}
-              <div className="flex-shrink-0 border-t border-zinc-800/40 px-3 py-3">
-                <div className="flex items-end gap-2 bg-zinc-900/40 border border-zinc-800/60 hover:border-blue-800/40 focus-within:border-blue-700/40 rounded-lg px-3 py-2 transition-all">
+              {/* ── INPUT — FIXED AT TOP ───────────────────────────────── */}
+              <div className="flex-shrink-0 border-b border-zinc-800/40 px-3 py-2.5">
+                <div className="flex items-center gap-2 bg-zinc-900/50 border border-zinc-800/60
+                  hover:border-blue-800/40 focus-within:border-blue-700/50 rounded-md px-3 py-2 transition-all">
+                  <span className="font-mono text-[10px] text-zinc-700 flex-shrink-0 select-none">›</span>
                   <textarea
                     ref={textRef}
                     rows={1}
                     value={input}
                     onChange={e => setInput(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }}
-                    placeholder={mode === 'council' ? 'Consult the AI Council…' : 'Message Javari…'}
-                    className="flex-1 bg-transparent resize-none text-sm text-zinc-200 placeholder-zinc-700 outline-none leading-relaxed font-mono min-h-[18px] max-h-[120px]"
+                    placeholder={mode === 'council' ? 'QUERY COUNCIL…' : 'QUERY JAVARI…'}
+                    className="flex-1 bg-transparent resize-none text-xs text-zinc-200 placeholder-zinc-700
+                      outline-none font-mono min-h-[16px] max-h-[80px] leading-relaxed tracking-wide"
                   />
                   <div className="flex items-center gap-1.5 flex-shrink-0">
-                    {hasChat && (
-                      <button onClick={clearChat}
-                        className="w-6 h-6 rounded flex items-center justify-center text-zinc-700 hover:text-zinc-500 transition-colors">
+                    {loading && (
+                      <div className="flex gap-0.5">
+                        {[0,1,2].map(i => (
+                          <div key={i} className="w-1 h-1 bg-blue-600 rounded-full animate-bounce"
+                            style={{ animationDelay: `${i * 0.12}s` }} />
+                        ))}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => send()}
+                      disabled={!input.trim() || loading}
+                      className="w-6 h-6 rounded bg-blue-800 hover:bg-blue-700 disabled:opacity-20
+                        disabled:cursor-not-allowed flex items-center justify-center transition-colors"
+                    >
+                      <Send className="w-3 h-3 text-blue-200" />
+                    </button>
+                    {messages.filter(m => m.role !== 'system').length > 0 && (
+                      <button
+                        onClick={clearChat}
+                        className="w-6 h-6 rounded flex items-center justify-center text-zinc-700
+                          hover:text-zinc-500 transition-colors"
+                      >
                         <RotateCcw className="w-3 h-3" />
                       </button>
                     )}
-                    <button onClick={() => send()} disabled={!input.trim() || loading}
-                      className="w-7 h-7 rounded bg-blue-700 hover:bg-blue-600 disabled:opacity-20 disabled:cursor-not-allowed flex items-center justify-center transition-colors">
-                      <Send className="w-3.5 h-3.5 text-white" />
-                    </button>
                   </div>
                 </div>
-                <p className="font-mono text-[9px] text-zinc-800 mt-1.5 text-center tracking-widest">ENTER TO SEND — SHIFT+ENTER FOR NEWLINE</p>
+                <p className="font-mono text-[8px] text-zinc-800 mt-1 tracking-[0.2em]">
+                  ENTER — SHIFT+ENTER FOR NEWLINE
+                </p>
+              </div>
+
+              {/* ── LIVE FEED — newest entry at top, older below ──────── */}
+              <div className="flex-1 overflow-y-auto min-h-0" ref={feedRef}>
+
+                {/* In-flight row: always at very top while loading */}
+                {loading && (
+                  <div className="border-b border-zinc-800/30 px-3 py-2 bg-blue-950/10">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="font-mono text-[9px] text-zinc-700 tabular-nums select-none">
+                        {new Date().toISOString().replace('T', ' ').slice(0, 19)}
+                      </span>
+                      <span className="font-mono text-[9px] text-blue-500 tracking-widest">
+                        — {mode === 'council' ? 'COUNCIL' : 'JAVARI'}
+                      </span>
+                      <span className="flex gap-0.5 ml-1">
+                        {[0,1,2].map(i => (
+                          <span key={i}
+                            className="w-1 h-1 inline-block bg-blue-500 rounded-full animate-bounce"
+                            style={{ animationDelay: `${i * 0.15}s` }}
+                          />
+                        ))}
+                      </span>
+                    </div>
+                    <p className="font-mono text-[10px] text-blue-400 tracking-wider av-blink">
+                      PROCESSING…
+                    </p>
+                  </div>
+                )}
+
+                {/* Messages: reversed so newest is at top */}
+                {[...messages].reverse().map(msg => {
+                  const ts = new Date(msg.ts).toISOString().replace('T', ' ').slice(0, 19)
+                  const roleLabel =
+                    msg.role === 'user'           ? 'YOU'       :
+                    msg.role === 'system'          ? 'SYS'       :
+                    msg.agent === 'planner'        ? 'ARCHITECT' :
+                    msg.agent === 'builder'        ? 'BUILDER'   :
+                    msg.agent === 'validator'      ? 'ANALYST'   :
+                    mode    === 'council'          ? 'COUNCIL'   :
+                                                    'JAVARI'
+                  const roleColor =
+                    msg.role === 'user'           ? 'text-zinc-400'    :
+                    msg.role === 'system'          ? 'text-zinc-700'    :
+                    msg.agent === 'planner'        ? 'text-violet-500'  :
+                    msg.agent === 'builder'        ? 'text-blue-500'    :
+                    msg.agent === 'validator'      ? 'text-emerald-500' :
+                    msg.error                      ? 'text-red-500'     :
+                                                    'text-blue-400'
+                  const textColor =
+                    msg.role === 'user'   ? 'text-zinc-300'  :
+                    msg.role === 'system' ? 'text-zinc-700'  :
+                    msg.error             ? 'text-red-400'   :
+                                            'text-zinc-200'
+
+                  return (
+                    <div
+                      key={msg.id}
+                      className={`border-b border-zinc-800/20 px-3 py-2.5 transition-colors hover:bg-zinc-900/20 ${
+                        msg.role === 'user' ? 'bg-zinc-900/30' : ''
+                      }`}
+                    >
+                      {/* Header: timestamp — ROLE  [model] */}
+                      <div className="flex items-center gap-2 mb-1.5 flex-wrap">
+                        <span className="font-mono text-[9px] text-zinc-700 tabular-nums flex-shrink-0 select-none">
+                          {ts}
+                        </span>
+                        <span className={`font-mono text-[9px] tracking-widest ${roleColor}`}>
+                          — {roleLabel}
+                        </span>
+                        {msg.model && (
+                          <span className="font-mono text-[9px] text-zinc-800 ml-auto tabular-nums">
+                            {msg.model.split('-').slice(-2).join('-')}
+                          </span>
+                        )}
+                      </div>
+                      {/* Content */}
+                      <p className={`font-mono text-xs leading-relaxed whitespace-pre-wrap break-words ${textColor}`}>
+                        {msg.content}
+                      </p>
+                    </div>
+                  )
+                })}
+
+                {/* Empty-state prompt chips */}
+                {messages.filter(m => m.role !== 'system').length === 0 && !loading && (
+                  <div className="flex flex-col items-center justify-center h-full gap-3 py-8 select-none">
+                    <p className="font-mono text-[9px] text-zinc-800 tracking-[0.3em] uppercase">
+                      Feed empty
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 justify-center max-w-xs px-4">
+                      {PROMPTS.map(p => (
+                        <button
+                          key={p}
+                          onClick={() => send(p)}
+                          className="px-2 py-1 font-mono text-[9px] text-zinc-700 bg-zinc-900/40
+                            border border-zinc-800/50 rounded hover:border-blue-800/40
+                            hover:text-blue-500 transition-all tracking-wider"
+                        >
+                          {p}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           </Q>

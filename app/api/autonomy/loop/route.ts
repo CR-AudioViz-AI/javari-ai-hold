@@ -1,11 +1,10 @@
 // app/api/autonomy/loop/route.ts
 // Javari Autonomous Loop — cron trigger every 2 minutes
 // Respects SYSTEM_MODE from javari_system_config:
-//   BUILD: pulls from roadmap_tasks WHERE source='roadmap_master' first, then any pending
+//   BUILD: pulls from roadmap_tasks WHERE source='roadmap_master' first, then any pending/retry
 //   SCAN:  standard queue execution
 //   MAINTAIN: no-op
-// Concurrent build limit: MAX_CONCURRENT_BUILDS config key
-// Saturday, March 14, 2026
+// Monday, March 16, 2026 — increased throughput to MAX_TASKS_PER_LOOP=10
 import { NextResponse }  from 'next/server'
 import { createClient }  from '@supabase/supabase-js'
 import { route }         from '@/lib/javari/model-router'
@@ -14,8 +13,8 @@ export const dynamic   = 'force-dynamic'
 export const runtime   = 'nodejs'
 export const maxDuration = 60
 
-const DAILY_BUDGET  = 1.00
-const DEFAULT_MAX   = 3
+const DAILY_BUDGET      = 1.00
+const MAX_TASKS_PER_LOOP = 10   // increased from 2 → 10 for higher throughput
 
 function db() {
   return createClient(
@@ -37,15 +36,18 @@ export async function GET() {
   // Load system config
   const config    = await getConfig(supabase)
   const mode      = config['SYSTEM_MODE'] ?? 'SCAN'
-  const maxPerRun = parseInt(config['MAX_CONCURRENT_BUILDS'] ?? '3', 10)
+  // Use MAX_TASKS_PER_LOOP constant — config override still respected but capped at 10
+  const maxPerRun = Math.min(
+    parseInt(config['MAX_CONCURRENT_BUILDS'] ?? String(MAX_TASKS_PER_LOOP), 10),
+    MAX_TASKS_PER_LOOP
+  )
 
   // MAINTAIN mode — no execution
   if (mode === 'MAINTAIN') {
     return NextResponse.json({ status: 'maintain_mode', message: 'System in MAINTAIN mode — no execution', mode })
   }
 
-
-  // Heartbeat: write to javari_jobs on EVERY cycle so Vercel cron execution is provable
+  // Heartbeat: write to javari_jobs on EVERY cycle
   supabase.from('javari_jobs').insert({
     task: 'cron_heartbeat', priority: 'low', status: 'complete',
     dry_run: false, triggered_by: 'cron_build_loop',
@@ -53,7 +55,8 @@ export async function GET() {
     started_at: new Date(cycleStart).toISOString(),
     completed_at: new Date(cycleStart).toISOString(),
     result: { heartbeat: true, note: 'written every cron cycle regardless of tasks' },
-  }) // fire-and-forget — proves cron fired even when loop returns idle
+  }) // fire-and-forget
+
   // Budget gate
   const spent = await getDailySpend()
   if (spent >= DAILY_BUDGET) {
@@ -66,50 +69,49 @@ export async function GET() {
   // BUILD mode: prioritise roadmap_master tasks
   const taskSource = mode === 'BUILD' ? 'roadmap_master' : null
 
-  for (let i = 0; i < maxPerRun; i++) {
-    const currentSpend = await getDailySpend()
-    if (currentSpend >= DAILY_BUDGET) break
+  // Source priority waterfall: roadmap_master → javari_scanner → planner
+  const sourcePriority = taskSource
+    ? [taskSource, 'javari_scanner', 'planner']
+    : ['javari_scanner', 'planner']
 
-    // Fetch next task — BUILD mode prioritises roadmap_master source
-    // taskQuery retained for reference — actual fetch is via waterfall below
-    let taskQuery = supabase
+  // Fetch up to MAX_TASKS_PER_LOOP tasks in one query per source
+  type TaskRow = { id: string; title: string; description: string | null; phase_id: string | null; metadata: Record<string, unknown> | null }
+  let taskBatch: TaskRow[] = []
+
+  for (const src of sourcePriority) {
+    const { data } = await supabase
       .from('roadmap_tasks')
       .select('id, title, description, phase_id, metadata')
       .in('status', ['pending', 'retry'])
+      .eq('source', src)
       .order('id', { ascending: true })
-      .limit(1)
-
-    // Source priority waterfall: roadmap_master → javari_scanner → planner
-    // Try each source in order until a task is found or all queues empty
-    const sourcePriority = taskSource
-      ? [taskSource, 'javari_scanner', 'planner']
-      : ['javari_scanner', 'planner']
-    let tasks: { id: string; title: string; description: string | null; phase_id: string | null; metadata: Record<string, unknown> | null }[] | null = null
-
-    // Claim pending OR retry tasks — retry tasks re-enter the queue after failure
-    for (const src of sourcePriority) {
-      const { data } = await supabase
-        .from('roadmap_tasks')
-        .select('id, title, description, phase_id, metadata')
-        .in('status', ['pending', 'retry'])
-        .eq('source', src)
-        .order('id', { ascending: true })
-        .limit(1)
-      if (data?.length) {
-        tasks = data
-        break
-      }
-    }
-
-    if (!tasks?.length) {
-      // All source queues empty — genuinely idle
+      .limit(MAX_TASKS_PER_LOOP)
+    if (data?.length) {
+      taskBatch = data as TaskRow[]
       break
     }
+  }
 
-    const task     = tasks[0]
+  if (!taskBatch.length) {
+    const finalSpend = await getDailySpend()
+    return NextResponse.json({
+      status: 'idle', mode, tasks_run: 0, executed: [],
+      daily_spend: `$${finalSpend.toFixed(4)}`,
+      budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
+      cycle_ms: Date.now() - cycleStart,
+      timestamp: new Date().toISOString(),
+    })
+  }
+
+  // Process each task (up to maxPerRun budget-gated)
+  for (const task of taskBatch.slice(0, maxPerRun)) {
+    const currentSpend = await getDailySpend()
+    if (currentSpend >= DAILY_BUDGET) break
+
     const meta     = (task.metadata ?? {}) as Record<string, unknown>
     const taskType = (meta.task_type as string) ?? detectType(task.title + ' ' + (task.description ?? ''))
 
+    // Claim: pending/retry → in_progress
     await supabase.from('roadmap_tasks')
       .update({ status: 'in_progress', updated_at: Date.now() })
       .eq('id', task.id)
@@ -120,7 +122,7 @@ export async function GET() {
         `Task: ${task.title}`,
         task.description ? `Description: ${task.description}` : '',
         meta.target_url ? `Target URL: ${meta.target_url}` : '',
-        meta.milestone ? `Milestone: ${meta.milestone}` : '',
+        meta.milestone  ? `Milestone: ${meta.milestone}`  : '',
       ].filter(Boolean).join('\n')
 
       const result = await route(taskType as any, prompt, {
@@ -135,12 +137,14 @@ export async function GET() {
       })
 
       if (result.blocked) {
+        // Blocked → back to pending (not retry — blocker may resolve)
         await supabase.from('roadmap_tasks')
           .update({ status: 'pending', error: result.reason, updated_at: Date.now() })
           .eq('id', task.id)
         break
       }
 
+      // in_progress → completed
       await supabase.from('roadmap_tasks').update({
         status:         'completed',
         assigned_model: result.model,
@@ -150,7 +154,6 @@ export async function GET() {
         updated_at:     Date.now(),
       }).eq('id', task.id)
 
-      // Write job
       const { data: job } = await supabase.from('javari_jobs').insert({
         task:         task.title,
         priority:     (meta.priority as string) ?? 'normal',
@@ -163,7 +166,6 @@ export async function GET() {
         result:       { output: result.content.slice(0, 2000), model: result.model, cost: result.cost },
       }).select('id').single()
 
-      // Write memory
       const memType = ['planning','analysis'].includes(taskType) ? 'decision' : 'fact'
       await supabase.from('javari_memory').insert({
         memory_type: memType,
@@ -174,7 +176,6 @@ export async function GET() {
         content:     result.content.slice(0, 8000),
       })
 
-      // Update javari_roadmap_progress if milestone matches
       if (meta.milestone) {
         await supabase.from('javari_roadmap_progress')
           .update({ status: 'complete', notes: `Executed by Javari AI: ${result.model}`, updated_at: new Date().toISOString() })
@@ -184,8 +185,10 @@ export async function GET() {
 
       taskResult = { roadmap_task_id: task.id, title: task.title, task_type: taskType,
                      model: result.model, cost: result.cost, job_id: job?.id }
+
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
+      // in_progress → retry on failure
       await supabase.from('roadmap_tasks')
         .update({ status: 'retry', error: msg, updated_at: Date.now() })
         .eq('id', task.id)

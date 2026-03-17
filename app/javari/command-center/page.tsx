@@ -1,13 +1,12 @@
 // app/javari/command-center/page.tsx
 // Javari OS — Command Center
-// Restored: Tuesday, March 17, 2026
-// Fetches /api/autonomy/status, renders task lifecycle counts + recent tasks.
-// Safe-guarded against all undefined access — never renders blank screen.
+// Design: Mission Control / Deep Space Ops — dark, monospace, phosphor accents
+// Tuesday, March 17, 2026
 'use client'
 
 import React, { useEffect, useState, useCallback } from 'react'
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Types (unchanged) ─────────────────────────────────────────────────────────
 interface TaskCounts {
   total:        number
   pending:      number
@@ -39,55 +38,99 @@ interface SystemInfo {
 }
 
 interface StatusPayload {
-  ok:           boolean
-  timestamp?:   string
-  system?:      SystemInfo
-  tasks?:       TaskCounts
-  recent_tasks?: RecentTask[]
-  error?:       string
+  ok:             boolean
+  timestamp?:     string
+  system?:        SystemInfo
+  tasks?:         TaskCounts
+  recent_tasks?:  RecentTask[]
+  error?:         string
+}
+
+// ── Status config ─────────────────────────────────────────────────────────────
+const STATUS_CFG: Record<string, { dot: string; text: string; ring: string; label: string }> = {
+  pending:     { dot: 'bg-amber-400',    text: 'text-amber-400',    ring: 'ring-amber-400/30',  label: 'PENDING'     },
+  in_progress: { dot: 'bg-blue-400',     text: 'text-blue-400',     ring: 'ring-blue-400/30',   label: 'IN PROGRESS' },
+  retry:       { dot: 'bg-orange-400',   text: 'text-orange-400',   ring: 'ring-orange-400/30', label: 'RETRY'       },
+  verifying:   { dot: 'bg-violet-400',   text: 'text-violet-400',   ring: 'ring-violet-400/30', label: 'VERIFYING'   },
+  blocked:     { dot: 'bg-red-500',      text: 'text-red-400',      ring: 'ring-red-400/30',    label: 'BLOCKED'     },
+  completed:   { dot: 'bg-emerald-400',  text: 'text-emerald-400',  ring: 'ring-emerald-400/30',label: 'COMPLETED'   },
+  failed:      { dot: 'bg-red-600',      text: 'text-red-500',      ring: 'ring-red-500/30',    label: 'FAILED'      },
+  running:     { dot: 'bg-blue-400',     text: 'text-blue-400',     ring: 'ring-blue-400/30',   label: 'IN PROGRESS' }, // legacy
+}
+
+function getStatus(status?: string) {
+  return STATUS_CFG[status ?? ''] ?? { dot: 'bg-zinc-500', text: 'text-zinc-400', ring: 'ring-zinc-400/20', label: status?.toUpperCase() ?? 'UNKNOWN' }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const BADGE: Record<string, string> = {
-  pending:     'bg-yellow-100 text-yellow-800 border-yellow-200',
-  in_progress: 'bg-blue-100 text-blue-800 border-blue-200',
-  retry:       'bg-orange-100 text-orange-800 border-orange-200',
-  verifying:   'bg-purple-100 text-purple-800 border-purple-200',
-  blocked:     'bg-red-100 text-red-800 border-red-200',
-  completed:   'bg-green-100 text-green-800 border-green-200',
-  failed:      'bg-red-200 text-red-900 border-red-300',
-  // legacy alias — maps silently
-  running:     'bg-blue-100 text-blue-800 border-blue-200',
-}
-
-function Badge({ status = 'unknown' }: { status?: string }) {
-  const cls = BADGE[status] ?? 'bg-gray-100 text-gray-600 border-gray-200'
-  // normalise legacy 'running' label for display
-  const label = status === 'running' ? 'in_progress' : status
-  return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium border ${cls}`}>
-      {label}
-    </span>
-  )
-}
-
-function StatTile({
-  label, value, accent,
-}: { label: string; value: number; accent: string }) {
-  return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-4 flex flex-col gap-1">
-      <span className="text-xs font-medium text-gray-400 uppercase tracking-wider">{label}</span>
-      <span className={`text-3xl font-bold ${accent}`}>{value}</span>
-    </div>
-  )
-}
-
 function formatUpdated(raw?: string | number): string {
   if (!raw) return '—'
   try {
     const d = typeof raw === 'number' ? new Date(raw) : new Date(raw)
     return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   } catch { return '—' }
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
+
+/** Pulsing status dot */
+function Dot({ status }: { status?: string }) {
+  const cfg = getStatus(status)
+  const isActive = status === 'in_progress' || status === 'running'
+  return (
+    <span className="relative inline-flex h-2 w-2 flex-shrink-0">
+      {isActive && (
+        <span className={`animate-ping absolute inline-flex h-full w-full rounded-full ${cfg.dot} opacity-60`} />
+      )}
+      <span className={`relative inline-flex rounded-full h-2 w-2 ${cfg.dot}`} />
+    </span>
+  )
+}
+
+/** Status badge — monospace pill */
+function Badge({ status }: { status?: string }) {
+  const cfg = getStatus(status)
+  return (
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded ring-1 ${cfg.ring} bg-black/40 font-mono text-[10px] tracking-widest ${cfg.text}`}>
+      <Dot status={status} />
+      {cfg.label}
+    </span>
+  )
+}
+
+/** Metric tile */
+function MetricTile({
+  label, value, accent, glow = false,
+}: { label: string; value: number; accent: string; glow?: boolean }) {
+  return (
+    <div className={`
+      relative overflow-hidden rounded-xl border border-zinc-800/80
+      bg-gradient-to-b from-zinc-900/90 to-zinc-950/90
+      backdrop-blur-sm p-5
+      ${glow ? 'shadow-lg shadow-blue-900/20' : ''}
+      group hover:border-zinc-700 transition-all duration-300
+    `}>
+      {/* corner accent */}
+      <div className="absolute top-0 right-0 w-12 h-12 bg-gradient-to-bl from-white/[0.03] to-transparent rounded-bl-xl" />
+      <p className="font-mono text-[10px] tracking-[0.2em] text-zinc-500 uppercase mb-3">{label}</p>
+      <p className={`font-mono text-4xl font-bold tabular-nums ${accent} leading-none`}>
+        {value.toLocaleString()}
+      </p>
+    </div>
+  )
+}
+
+/** Scanline overlay for CRT texture */
+function Scanlines() {
+  return (
+    <div
+      className="pointer-events-none fixed inset-0 z-0"
+      style={{
+        backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.08) 2px, rgba(0,0,0,0.08) 4px)',
+        backgroundSize: '100% 4px',
+      }}
+    />
+  )
 }
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
@@ -98,6 +141,7 @@ export default function CommandCenterPage() {
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
   const [lastAt,  setLastAt]  = useState<string>('')
+  const [tick,    setTick]    = useState(0)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -108,6 +152,7 @@ export default function CommandCenterPage() {
       setData(json)
       setError(null)
       setLastAt(new Date().toLocaleTimeString())
+      setTick(t => t + 1)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
@@ -121,180 +166,248 @@ export default function CommandCenterPage() {
     return () => clearInterval(t)
   }, [fetchStatus])
 
-  // ── safe-extract with fallbacks so nothing can crash ──────────────────────
-  const sys     = data?.system
-  const tasks   = data?.tasks
-  const recent  = data?.recent_tasks ?? []
+  // Safe-extract with fallbacks
+  const sys    = data?.system
+  const tasks  = data?.tasks
+  const recent = data?.recent_tasks ?? []
 
   const budgetPct = sys
     ? Math.min(100, Math.round(100 * (sys.budget_spent ?? 0) / (sys.budget_daily || 1)))
     : 0
 
-  // ── Loading state ──────────────────────────────────────────────────────────
+  // ── Loading ────────────────────────────────────────────────────────────────
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-blue-600 mx-auto mb-3" />
-          <p className="text-gray-500 text-sm">Command Center loading…</p>
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <Scanlines />
+        <div className="text-center z-10">
+          <div className="w-10 h-10 border border-blue-500/50 border-t-blue-400 rounded-full animate-spin mx-auto mb-4" />
+          <p className="font-mono text-xs tracking-[0.3em] text-blue-400/70 uppercase">
+            Command Center loading…
+          </p>
         </div>
       </div>
     )
   }
 
-  // ── Error state — never blank ──────────────────────────────────────────────
+  // ── Error (never blank) ────────────────────────────────────────────────────
   if (error && !data) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center p-6">
-        <div className="bg-white rounded-xl border border-red-200 shadow p-8 max-w-md w-full text-center">
-          <p className="text-red-600 font-semibold text-lg mb-2">Command Center unavailable</p>
-          <p className="text-gray-500 text-sm mb-4">{error}</p>
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-6">
+        <Scanlines />
+        <div className="z-10 border border-red-800/60 rounded-xl bg-zinc-900/80 backdrop-blur p-8 max-w-md w-full text-center">
+          <div className="w-2 h-2 bg-red-500 rounded-full mx-auto mb-4 animate-pulse" />
+          <p className="font-mono text-red-400 text-sm tracking-widest uppercase mb-2">System Offline</p>
+          <p className="text-zinc-500 text-xs font-mono mb-6">{error}</p>
           <button
             onClick={fetchStatus}
-            className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm hover:bg-blue-700 transition"
+            className="px-5 py-2 font-mono text-xs tracking-widest uppercase bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg border border-zinc-700 transition"
           >
-            Retry
+            Reconnect
           </button>
         </div>
       </div>
     )
   }
 
-  // ── No data fallback ───────────────────────────────────────────────────────
+  // ── No data ────────────────────────────────────────────────────────────────
   if (!data) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <p className="text-gray-400 text-sm">No data available — retrying…</p>
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center">
+        <Scanlines />
+        <p className="font-mono text-zinc-600 text-xs tracking-widest uppercase z-10">
+          No data available — retrying…
+        </p>
       </div>
     )
   }
 
   // ── Main render ────────────────────────────────────────────────────────────
-  return (
-    <div className="min-h-screen bg-gray-50">
-      <div className="max-w-6xl mx-auto px-6 py-8 space-y-8">
+  const modeColor = sys?.mode === 'BUILD' ? 'text-blue-400' :
+                    sys?.mode === 'SCAN'  ? 'text-violet-400' : 'text-amber-400'
 
-        {/* Header */}
-        <div className="flex items-start justify-between flex-wrap gap-4">
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">Command Center</h1>
-            <p className="text-sm text-gray-500 mt-1">
-              Mode: <span className="font-medium text-blue-700">{sys?.mode ?? '—'}</span>
-              {' · '}Phase {sys?.active_phase ?? '—'}
-              {lastAt && <span className="ml-2 text-gray-400">· refreshed {lastAt}</span>}
-            </p>
-          </div>
-          <div className="flex gap-2 items-center">
-            {error && (
-              <span className="text-xs text-orange-600 bg-orange-50 border border-orange-200 rounded px-2 py-1">
-                Partial error: {error}
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 relative overflow-hidden">
+      <Scanlines />
+
+      {/* Background gradient bloom */}
+      <div className="pointer-events-none fixed top-0 left-1/2 -translate-x-1/2 w-[900px] h-[400px] bg-indigo-900/10 rounded-full blur-3xl" />
+      <div className="pointer-events-none fixed bottom-0 right-0 w-[500px] h-[300px] bg-violet-900/8 rounded-full blur-3xl" />
+
+      <div className="relative z-10 max-w-7xl mx-auto px-6 py-8 space-y-6">
+
+        {/* ── Top status bar ───────────────────────────────────────────────── */}
+        <div className="flex items-center justify-between flex-wrap gap-4 pb-4 border-b border-zinc-800/60">
+          <div className="flex items-center gap-4">
+            {/* Logo mark */}
+            <div className="flex items-center gap-2">
+              <div className="w-6 h-6 rounded bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center">
+                <span className="text-white font-mono text-[10px] font-bold">J</span>
+              </div>
+              <span className="font-mono text-xs tracking-[0.25em] text-zinc-400 uppercase">
+                Javari OS
               </span>
+              <span className="text-zinc-700 font-mono text-xs">·</span>
+              <span className="font-mono text-xs tracking-[0.2em] text-zinc-500 uppercase">
+                Command Center
+              </span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-6 font-mono text-xs">
+            {/* Mode */}
+            <div className="flex items-center gap-2">
+              <span className="text-zinc-600 tracking-widest uppercase text-[10px]">Mode</span>
+              <span className={`${modeColor} tracking-widest font-bold`}>{sys?.mode ?? '—'}</span>
+            </div>
+            {/* Phase */}
+            <div className="flex items-center gap-2">
+              <span className="text-zinc-600 tracking-widest uppercase text-[10px]">Phase</span>
+              <span className="text-zinc-300 font-bold">{sys?.active_phase ?? '—'}</span>
+            </div>
+            {/* Last update */}
+            {lastAt && (
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-zinc-500 text-[10px]">{lastAt}</span>
+              </div>
             )}
+            {/* Refresh */}
             <button
               onClick={fetchStatus}
-              className="px-3 py-1.5 text-sm bg-white hover:bg-gray-100 border border-gray-300 rounded-lg transition"
+              className="px-3 py-1 rounded border border-zinc-800 bg-zinc-900/60 hover:border-zinc-600 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200 tracking-widest text-[10px] uppercase transition-all"
             >
-              ↻ Refresh
+              ↻ Sync
             </button>
           </div>
         </div>
 
-        {/* Budget bar */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-5">
-          <div className="flex justify-between text-sm mb-2">
-            <span className="font-medium text-gray-700">Daily AI Budget</span>
-            <span className="text-gray-500">
-              ${(sys?.budget_spent ?? 0).toFixed(4)} spent
-              {' / '}${(sys?.budget_daily ?? 1).toFixed(2)} daily
-              {' — '}{budgetPct}% used
-            </span>
+        {/* ── Budget strip ─────────────────────────────────────────────────── */}
+        <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/40 backdrop-blur-sm p-4">
+          <div className="flex items-center justify-between font-mono text-xs mb-3">
+            <div className="flex items-center gap-3">
+              <span className="text-zinc-500 tracking-widest uppercase text-[10px]">Daily Budget</span>
+              <span className="text-zinc-200">${(sys?.budget_spent ?? 0).toFixed(4)}</span>
+              <span className="text-zinc-700">/</span>
+              <span className="text-zinc-500">${(sys?.budget_daily ?? 1).toFixed(2)}</span>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className={`${budgetPct > 80 ? 'text-red-400' : budgetPct > 50 ? 'text-amber-400' : 'text-emerald-400'} font-bold`}>
+                {budgetPct}%
+              </span>
+              <span className="text-zinc-600 text-[10px] tracking-widest">
+                ${(sys?.budget_left ?? 0).toFixed(4)} remaining
+              </span>
+            </div>
           </div>
-          <div className="w-full bg-gray-200 rounded-full h-3">
+          {/* Budget bar */}
+          <div className="w-full h-1.5 bg-zinc-800 rounded-full overflow-hidden">
             <div
-              className={`h-3 rounded-full transition-all duration-700 ${
-                budgetPct > 80 ? 'bg-red-500' :
-                budgetPct > 50 ? 'bg-yellow-500' : 'bg-green-500'
+              className={`h-full rounded-full transition-all duration-1000 ${
+                budgetPct > 80 ? 'bg-gradient-to-r from-red-600 to-red-400' :
+                budgetPct > 50 ? 'bg-gradient-to-r from-amber-600 to-amber-400' :
+                'bg-gradient-to-r from-indigo-600 to-emerald-400'
               }`}
               style={{ width: `${budgetPct}%` }}
             />
           </div>
-          <p className="text-xs text-gray-400 mt-1.5">
-            ${(sys?.budget_left ?? 0).toFixed(4)} remaining today
-          </p>
         </div>
 
-        {/* Task count tiles — full lifecycle */}
+        {/* ── Metric grid ──────────────────────────────────────────────────── */}
         <div>
-          <h2 className="text-sm font-semibold text-gray-600 uppercase tracking-wide mb-3">
+          <p className="font-mono text-[10px] tracking-[0.25em] text-zinc-600 uppercase mb-3">
             Task Lifecycle
-          </h2>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-            <StatTile label="Pending"      value={tasks?.pending     ?? 0} accent="text-yellow-600" />
-            <StatTile label="In Progress"  value={tasks?.in_progress ?? 0} accent="text-blue-600"   />
-            <StatTile label="Retry"        value={tasks?.retry       ?? 0} accent="text-orange-600" />
-            <StatTile label="Verifying"    value={tasks?.verifying   ?? 0} accent="text-purple-600" />
-            <StatTile label="Blocked"      value={tasks?.blocked     ?? 0} accent="text-red-600"    />
-            <StatTile label="Completed"    value={tasks?.completed   ?? 0} accent="text-green-600"  />
-            <StatTile label="Failed"       value={tasks?.failed      ?? 0} accent="text-red-700"    />
-            <StatTile label="Total"        value={tasks?.total       ?? 0} accent="text-gray-700"   />
+          </p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <MetricTile label="Pending"     value={tasks?.pending     ?? 0} accent="text-amber-400"   />
+            <MetricTile label="In Progress" value={tasks?.in_progress ?? 0} accent="text-blue-400"    glow />
+            <MetricTile label="Retry"       value={tasks?.retry       ?? 0} accent="text-orange-400"  />
+            <MetricTile label="Verifying"   value={tasks?.verifying   ?? 0} accent="text-violet-400"  />
+            <MetricTile label="Blocked"     value={tasks?.blocked     ?? 0} accent="text-red-400"     />
+            <MetricTile label="Completed"   value={tasks?.completed   ?? 0} accent="text-emerald-400" />
+            <MetricTile label="Failed"      value={tasks?.failed      ?? 0} accent="text-red-500"     />
+            <MetricTile label="Total"       value={tasks?.total       ?? 0} accent="text-zinc-300"    />
           </div>
         </div>
 
-        {/* Recent tasks table */}
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
-          <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-            <h2 className="font-semibold text-gray-900">
-              Recent Tasks
-              <span className="ml-2 text-xs font-normal text-gray-400">
-                (last {(recent ?? []).length})
+        {/* ── Live task feed ───────────────────────────────────────────────── */}
+        <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 backdrop-blur-sm overflow-hidden">
+
+          {/* Table header bar */}
+          <div className="px-5 py-3.5 border-b border-zinc-800/60 flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+              <span className="font-mono text-[10px] tracking-[0.25em] text-zinc-400 uppercase">
+                Live Task Feed
               </span>
-            </h2>
+              <span className="font-mono text-[10px] text-zinc-700">
+                [{(recent ?? []).length} entries]
+              </span>
+            </div>
+            <span className="font-mono text-[10px] text-zinc-700 tracking-widest">
+              AUTO-REFRESH 15s
+            </span>
           </div>
 
           {(recent ?? []).length === 0 ? (
-            <div className="px-5 py-10 text-center text-gray-400 text-sm">
-              No tasks recorded yet.
+            <div className="px-5 py-12 text-center">
+              <p className="font-mono text-xs tracking-widest text-zinc-700 uppercase">
+                No tasks recorded
+              </p>
             </div>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 text-xs text-gray-500 uppercase tracking-wide">
-                  <tr>
-                    <th className="px-5 py-3 text-left">Title</th>
-                    <th className="px-4 py-3 text-left">Status</th>
-                    <th className="px-4 py-3 text-left">Source</th>
-                    <th className="px-4 py-3 text-left">Model</th>
-                    <th className="px-4 py-3 text-right">Cost</th>
-                    <th className="px-4 py-3 text-right">Updated</th>
+              <table className="w-full">
+                <thead>
+                  <tr className="border-b border-zinc-800/40">
+                    {['Task', 'Status', 'Source', 'Model', 'Cost', 'Updated'].map(h => (
+                      <th
+                        key={h}
+                        className="px-5 py-2.5 text-left font-mono text-[9px] tracking-[0.2em] text-zinc-600 uppercase"
+                      >
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-gray-100">
+                <tbody>
                   {(recent ?? []).map((task, i) => (
-                    <tr key={task?.id ?? i} className="hover:bg-gray-50 transition-colors">
+                    <tr
+                      key={task?.id ?? i}
+                      className="border-b border-zinc-800/20 hover:bg-white/[0.02] transition-colors group"
+                    >
                       <td className="px-5 py-3 max-w-xs">
                         <span
-                          className="block truncate text-gray-900 font-medium"
+                          className="block truncate font-mono text-xs text-zinc-200 group-hover:text-white transition-colors"
                           title={task?.title ?? ''}
                         >
                           {task?.title ?? '—'}
                         </span>
                       </td>
-                      <td className="px-4 py-3">
-                        <Badge status={task?.status ?? 'unknown'} />
+                      <td className="px-5 py-3">
+                        <Badge status={task?.status} />
                       </td>
-                      <td className="px-4 py-3 text-gray-500 text-xs">
-                        {task?.source ?? '—'}
+                      <td className="px-5 py-3">
+                        <span className="font-mono text-[10px] text-zinc-600 tracking-wider">
+                          {task?.source ?? '—'}
+                        </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-500 text-xs">
-                        {task?.model ?? '—'}
+                      <td className="px-5 py-3">
+                        <span className="font-mono text-[10px] text-zinc-500">
+                          {task?.model ?? '—'}
+                        </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-500 text-xs text-right">
-                        {task?.cost != null
-                          ? `$${Number(task.cost).toFixed(5)}`
-                          : '—'}
+                      <td className="px-5 py-3">
+                        <span className="font-mono text-[10px] text-zinc-500 tabular-nums">
+                          {task?.cost != null
+                            ? `$${Number(task.cost).toFixed(5)}`
+                            : '—'}
+                        </span>
                       </td>
-                      <td className="px-4 py-3 text-gray-400 text-xs text-right">
-                        {formatUpdated(task?.updated_at)}
+                      <td className="px-5 py-3 text-right">
+                        <span className="font-mono text-[10px] text-zinc-700 tabular-nums">
+                          {formatUpdated(task?.updated_at)}
+                        </span>
                       </td>
                     </tr>
                   ))}
@@ -304,23 +417,40 @@ export default function CommandCenterPage() {
           )}
         </div>
 
-        {/* Quick links */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-sm">
+        {/* ── Quick nav ────────────────────────────────────────────────────── */}
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           {[
-            { href: '/command/status',  label: 'Status Dashboard', desc: 'Full autonomy metrics' },
-            { href: '/javari/roadmap',  label: 'Roadmap',          desc: 'Phase progress tracker' },
-            { href: '/command/history', label: 'History',          desc: 'All autonomy events' },
+            { href: '/command/status',  label: 'Status Dashboard', sub: '/command/status'  },
+            { href: '/javari/roadmap',  label: 'Roadmap',          sub: '/javari/roadmap'  },
+            { href: '/command/history', label: 'History',          sub: '/command/history' },
           ].map(link => (
             <a
               key={link.href}
               href={link.href}
-              className="block bg-white rounded-xl border border-gray-200 p-4 hover:shadow-md hover:border-blue-300 transition-all"
+              className="group flex items-center justify-between px-4 py-3 rounded-xl border border-zinc-800/60 bg-zinc-900/30 hover:border-zinc-700 hover:bg-zinc-900/60 transition-all"
             >
-              <p className="font-semibold text-gray-900">{link.label}</p>
-              <p className="text-gray-500 text-xs mt-0.5">{link.desc}</p>
+              <div>
+                <p className="font-mono text-xs text-zinc-300 group-hover:text-white transition-colors">
+                  {link.label}
+                </p>
+                <p className="font-mono text-[10px] text-zinc-700 mt-0.5">{link.sub}</p>
+              </div>
+              <span className="font-mono text-zinc-700 group-hover:text-zinc-400 transition-colors text-sm">
+                →
+              </span>
             </a>
           ))}
         </div>
+
+        {/* Error banner (non-fatal) */}
+        {error && data && (
+          <div className="flex items-center gap-3 px-4 py-2.5 rounded-lg border border-amber-800/40 bg-amber-950/20">
+            <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse flex-shrink-0" />
+            <p className="font-mono text-[10px] text-amber-600 tracking-wider">
+              Partial sync error: {error}
+            </p>
+          </div>
+        )}
 
       </div>
     </div>

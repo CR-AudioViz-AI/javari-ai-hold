@@ -1,7 +1,7 @@
 // app/api/autonomy/status/route.ts
-// Javari AI — Autonomy status endpoint
-// Returns real-time task counts, recent executions, and system health
-// Monday, March 16, 2026
+// Javari OS — Autonomy Status
+// ALL data from roadmap_master (275 canonical tasks). Trusted, stable, deterministic.
+// Tuesday, March 17, 2026
 import { NextResponse }  from 'next/server'
 import { createClient }  from '@supabase/supabase-js'
 import { getDailySpend } from '@/lib/javari/model-router'
@@ -21,74 +21,129 @@ export async function GET() {
   try {
     const supabase = db()
 
-    // Task counts by status in one query
-    const { data: allTasks } = await supabase
-      .from('roadmap_tasks')
-      .select('status')
-
-    const counts = (allTasks ?? []).reduce<Record<string, number>>((acc, row) => {
-      const s = row.status ?? 'unknown'
-      acc[s] = (acc[s] ?? 0) + 1
-      return acc
-    }, {})
-
-    // Latest 10 executed tasks
-    const { data: recentTasks } = await supabase
-      .from('roadmap_tasks')
-      .select('id, title, status, source, assigned_model, cost, completed_at, updated_at')
-      .order('updated_at', { ascending: false })
-      .limit(10)
-
-    // System config
+    // Load config
     const { data: configRows } = await supabase
       .from('javari_system_config')
       .select('key,value')
-    const config = Object.fromEntries((configRows ?? []).map((r: { key: string; value: string }) => [r.key, r.value]))
+    const config = Object.fromEntries(
+      (configRows ?? []).map((r: { key: string; value: string }) => [r.key, r.value])
+    )
 
-    // Daily spend
-    const dailySpend = await getDailySpend()
+    // roadmap_master — canonical task counts (TOTAL = 275 fixed)
+    const { data: allTasks } = await supabase
+      .from('roadmap_master')
+      .select('id, phase, status, priority, module, module_family, title, executed_at, execution_model, execution_cost, verified')
+      .order('phase', { ascending: true })
 
-    // Recent jobs (last 5)
-    const { data: recentJobs } = await supabase
-      .from('javari_jobs')
-      .select('id, task, status, triggered_by, created_at')
-      .order('created_at', { ascending: false })
-      .limit(5)
+    const tasks = allTasks ?? []
+    const TOTAL = tasks.length
+
+    // Status breakdown
+    const statusMap: Record<string, number> = {}
+    for (const t of tasks) {
+      statusMap[t.status] = (statusMap[t.status] ?? 0) + 1
+    }
+
+    // Phase breakdown
+    const phaseMap: Record<number, { total: number; completed: number; in_progress: number; pending: number }> = {}
+    for (const t of tasks) {
+      const p = t.phase as number
+      if (!phaseMap[p]) phaseMap[p] = { total: 0, completed: 0, in_progress: 0, pending: 0 }
+      phaseMap[p].total++
+      if (t.status === 'completed')   phaseMap[p].completed++
+      if (t.status === 'in_progress') phaseMap[p].in_progress++
+      if (t.status === 'pending')     phaseMap[p].pending++
+    }
+
+    // Completion metrics
+    const completed   = statusMap['completed']   ?? 0
+    const inProgress  = statusMap['in_progress'] ?? 0
+    const pending     = statusMap['pending']      ?? 0
+    const pctComplete = TOTAL > 0 ? Math.round(100 * completed / TOTAL) : 0
+    const pctCoverage = TOTAL > 0 ? Math.round(100 * (completed + inProgress) / TOTAL) : 0
+
+    // Next 10 tasks queue (pending, phase-ordered)
+    const nextQueue = tasks
+      .filter(t => t.status === 'pending')
+      .slice(0, 10)
+      .map(t => ({ id: t.id, phase: t.phase, module: t.module, title: t.title, priority: t.priority }))
+
+    // Recent 10 executions
+    const { data: recentExec } = await supabase
+      .from('javari_execution_log')
+      .select('roadmap_task_id, task_type, model, cost_usd, duration_ms, status, executed_at, result_summary')
+      .order('executed_at', { ascending: false })
+      .limit(10)
+
+    // Budget
+    const budgetSpent  = await getDailySpend()
+    const budgetDaily  = parseFloat(config['BUILD_BUDGET_DAILY_USD'] ?? '1.00')
+    const budgetLeft   = Math.max(0, budgetDaily - budgetSpent)
+    const budgetPct    = Math.min(100, Math.round(100 * budgetSpent / budgetDaily))
+
+    // Last cycle learning stats
+    const lastCycleRaw = config['LEARNING_LAST_CYCLE']
+    const lastCycle = lastCycleRaw
+      ? (() => { try { return JSON.parse(lastCycleRaw) } catch { return null } })()
+      : null
 
     return NextResponse.json({
-      ok: true,
-      timestamp: new Date().toISOString(),
-      system: {
-        mode:        config['SYSTEM_MODE'] ?? 'SCAN',
-        active_phase: config['ACTIVE_PHASE'] ?? '1',
-        budget_daily: parseFloat(config['BUILD_BUDGET_DAILY_USD'] ?? '1.00'),
-        budget_spent: parseFloat(dailySpend.toFixed(4)),
-        budget_left:  parseFloat(Math.max(0, 1.00 - dailySpend).toFixed(4)),
+      ok:   true,
+      source: 'roadmap_master',
+
+      // Core metrics — trusted, stable
+      canonical: {
+        total:       TOTAL,
+        completed,
+        in_progress: inProgress,
+        pending,
+        pct_complete: pctComplete,
+        pct_coverage: pctCoverage,
       },
-      tasks: {
-        total:       (allTasks ?? []).length,
-        pending:     counts['pending']     ?? 0,
-        in_progress: counts['in_progress'] ?? 0,
-        retry:       counts['retry']       ?? 0,
-        verifying:   counts['verifying']   ?? 0,
-        blocked:     counts['blocked']     ?? 0,
-        completed:   counts['completed']   ?? 0,
-        failed:      counts['failed']      ?? 0,
-      },
-      recent_tasks: (recentTasks ?? []).map(t => ({
-        id:            t.id,
-        title:         t.title,
-        status:        t.status,
-        source:        t.source,
-        model:         t.assigned_model,
-        cost:          t.cost,
-        completed_at:  t.completed_at,
-        updated_at:    t.updated_at,
+
+      // Phase breakdown
+      phases: Object.fromEntries(
+        Object.entries(phaseMap).map(([phase, data]) => [
+          phase,
+          {
+            ...data,
+            pct: data.total > 0 ? Math.round(100 * data.completed / data.total) : 0,
+          },
+        ])
+      ),
+
+      // Next tasks queue
+      next_queue: nextQueue,
+
+      // Recent executions
+      recent_executions: (recentExec ?? []).map(e => ({
+        id:          e.roadmap_task_id,
+        type:        e.task_type,
+        model:       e.model,
+        cost:        e.cost_usd,
+        duration_ms: e.duration_ms,
+        status:      e.status,
+        executed_at: e.executed_at,
       })),
-      recent_jobs: recentJobs ?? [],
+
+      // System state
+      system: {
+        mode:           config['SYSTEM_MODE']          ?? 'BUILD',
+        active_phase:   parseInt(config['ACTIVE_PHASE'] ?? '2', 10),
+        budget_daily:   budgetDaily,
+        budget_spent:   budgetSpent,
+        budget_left:    budgetLeft,
+        budget_pct:     budgetPct,
+      },
+
+      // Last learning cycle
+      last_cycle: lastCycle,
+
+      timestamp: new Date().toISOString(),
     })
+
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
-    return NextResponse.json({ ok: false, error: msg, timestamp: new Date().toISOString() }, { status: 500 })
+    return NextResponse.json({ ok: false, error: msg }, { status: 500 })
   }
 }

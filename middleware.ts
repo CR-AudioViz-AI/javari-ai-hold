@@ -17,6 +17,7 @@ import { createServerClient } from "@supabase/ssr";
 // Routes that require authentication
 const PROTECTED_PREFIXES = [
   "/javari",
+  "/command-center",
   "/dashboard",
   "/account",
   "/admin",
@@ -66,7 +67,8 @@ export async function middleware(request: NextRequest) {
   // ── Auth route guard — redirect authenticated users away from login/signup
   if (AUTH_ROUTES.some(r => pathname.startsWith(r))) {
     if (isAuthenticated) {
-      return NextResponse.redirect(new URL("/javari", request.url));
+      return NextResponse.redirect(new URL("/javari",
+  "/command-center", request.url));
     }
     response.headers.set("x-is-javari", "false");
     return response;

@@ -140,8 +140,9 @@ export default function CommandCenterPage() {
   const [data,    setData]    = useState<StatusPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error,   setError]   = useState<string | null>(null)
-  const [lastAt,  setLastAt]  = useState<string>('')
-  const [tick,    setTick]    = useState(0)
+  const [lastAt,       setLastAt]       = useState<string>('')
+  const [tick,         setTick]         = useState(0)
+  const [authorityRate, setAuthorityRate] = useState<number | null>(null)
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -153,6 +154,14 @@ export default function CommandCenterPage() {
       setError(null)
       setLastAt(new Date().toLocaleTimeString())
       setTick(t => t + 1)
+      // Extract canonical rate from system config if available
+      try {
+        const lcv = (json as any)?.system_config?.LEARNING_LAST_CYCLE
+        if (lcv) {
+          const lc = typeof lcv === 'string' ? JSON.parse(lcv) : lcv
+          if (typeof lc?.canonical_rate === 'number') setAuthorityRate(lc.canonical_rate)
+        }
+      } catch {/* non-fatal */}
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Unknown error')
     } finally {
@@ -441,6 +450,43 @@ export default function CommandCenterPage() {
             </a>
           ))}
         </div>
+
+        {/* ── Authority Status ────────────────────────────────────────────── */}
+        <div className="rounded-xl border border-zinc-800/60 bg-zinc-900/30 backdrop-blur-sm overflow-hidden">
+          <div className="px-5 py-3.5 border-b border-zinc-800/60 flex items-center gap-3">
+            <div className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+            <span className="font-mono text-[10px] tracking-[0.25em] text-zinc-400 uppercase">
+              Authority Status
+            </span>
+          </div>
+          <div className="px-5 py-4 grid grid-cols-2 sm:grid-cols-4 gap-4 font-mono">
+            <div>
+              <p className="text-[10px] text-zinc-600 tracking-widest uppercase mb-1">Canonical Rate</p>
+              <p className="text-2xl font-bold tabular-nums text-violet-400">
+                {authorityRate !== null ? `${authorityRate}%` : '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] text-zinc-600 tracking-widest uppercase mb-1">Rejected Tasks</p>
+              <p className="text-2xl font-bold tabular-nums text-red-400">
+                {tasks?.blocked ?? 0}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] text-zinc-600 tracking-widest uppercase mb-1">Active Phase</p>
+              <p className="text-2xl font-bold tabular-nums text-blue-400">
+                {sys?.active_phase ?? '—'}
+              </p>
+            </div>
+            <div>
+              <p className="text-[10px] text-zinc-600 tracking-widest uppercase mb-1">Drift Detected</p>
+              <p className={`text-2xl font-bold tabular-nums ${(tasks?.blocked ?? 0) > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                {(tasks?.blocked ?? 0) > 0 ? 'YES' : 'CLEAN'}
+              </p>
+            </div>
+          </div>
+        </div>
+
 
         {/* Error banner (non-fatal) */}
         {error && data && (

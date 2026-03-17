@@ -1,20 +1,27 @@
 // app/api/autonomy/loop/route.ts
 // Javari Autonomous Loop — cron trigger every 2 minutes
-// Respects SYSTEM_MODE from javari_system_config:
-//   BUILD: pulls from roadmap_tasks WHERE source='roadmap_master' first, then any pending/retry
-//   SCAN:  standard queue execution
+// Authority: ALL tasks validated against canonicalAuthority before execution.
+//   BUILD: roadmap_master first, then javari_scanner, then planner (if canonical)
+//   SCAN:  scanner + canonical planner
 //   MAINTAIN: no-op
-// Monday, March 16, 2026 — MAX_TASKS_PER_LOOP=10, concurrent execution via Promise.allSettled
-import { NextResponse }  from 'next/server'
-import { createClient }  from '@supabase/supabase-js'
-import { route }         from '@/lib/javari/model-router'
-import { getDailySpend } from '@/lib/javari/model-router'
-export const dynamic   = 'force-dynamic'
-export const runtime   = 'nodejs'
+// Tuesday, March 17, 2026 — canonical authority + learning loop integrated
+import { NextResponse }   from 'next/server'
+import { createClient }   from '@supabase/supabase-js'
+import { route }          from '@/lib/javari/model-router'
+import { getDailySpend }  from '@/lib/javari/model-router'
+import {
+  filterToCanonical,
+  persistRejections,
+  getAuthorityStats,
+  type TaskRow,
+} from '@/lib/javari/canonicalAuthority'
+
+export const dynamic    = 'force-dynamic'
+export const runtime    = 'nodejs'
 export const maxDuration = 60
 
-const DAILY_BUDGET      = 1.00
-const MAX_TASKS_PER_LOOP = 10   // increased from 2 → 10 for higher throughput
+const DAILY_BUDGET       = 1.00
+const MAX_TASKS_PER_LOOP = 10
 
 function db() {
   return createClient(
@@ -30,14 +37,15 @@ async function getConfig(supabase: ReturnType<typeof db>): Promise<Record<string
 
 export async function GET() {
   const cycleStart = Date.now()
+  const cycleId    = `cycle-${cycleStart}`
   const supabase   = db()
   const executed: unknown[] = []
 
   // Load system config
-  const config    = await getConfig(supabase)
-  const mode      = config['SYSTEM_MODE'] ?? 'SCAN'
-  // Use MAX_TASKS_PER_LOOP constant — config override still respected but capped at 10
-  const maxPerRun = Math.min(
+  const config      = await getConfig(supabase)
+  const mode        = config['SYSTEM_MODE']     ?? 'SCAN'
+  const activePhase = parseInt(config['ACTIVE_PHASE'] ?? '2', 10)
+  const maxPerRun   = Math.min(
     parseInt(config['MAX_CONCURRENT_BUILDS'] ?? String(MAX_TASKS_PER_LOOP), 10),
     MAX_TASKS_PER_LOOP
   )
@@ -47,15 +55,15 @@ export async function GET() {
     return NextResponse.json({ status: 'maintain_mode', message: 'System in MAINTAIN mode — no execution', mode })
   }
 
-  // Heartbeat: write to javari_jobs on EVERY cycle
+  // Heartbeat: fire-and-forget
   supabase.from('javari_jobs').insert({
     task: 'cron_heartbeat', priority: 'low', status: 'complete',
     dry_run: false, triggered_by: 'cron_build_loop',
-    metadata: { mode, cycle_start: cycleStart },
-    started_at: new Date(cycleStart).toISOString(),
+    metadata: { mode, active_phase: activePhase, cycle_start: cycleStart, cycle_id: cycleId },
+    started_at:   new Date(cycleStart).toISOString(),
     completed_at: new Date(cycleStart).toISOString(),
-    result: { heartbeat: true, note: 'written every cron cycle regardless of tasks' },
-  }) // fire-and-forget
+    result: { heartbeat: true },
+  })
 
   // Budget gate
   const spent = await getDailySpend()
@@ -66,59 +74,88 @@ export async function GET() {
     })
   }
 
-  // BUILD mode: prioritise roadmap_master tasks
-  const taskSource = mode === 'BUILD' ? 'roadmap_master' : null
-
-  // Source priority waterfall: roadmap_master → javari_scanner → planner
+  // Source priority waterfall
+  const taskSource     = mode === 'BUILD' ? 'roadmap_master' : null
   const sourcePriority = taskSource
     ? [taskSource, 'javari_scanner', 'planner']
     : ['javari_scanner', 'planner']
 
-  // Fetch up to MAX_TASKS_PER_LOOP tasks in one query per source
-  type TaskRow = { id: string; title: string; description: string | null; phase_id: string | null; metadata: Record<string, unknown> | null }
-  let taskBatch: TaskRow[] = []
+  // Fetch candidates — over-fetch to account for canonical rejections
+  const FETCH_LIMIT = MAX_TASKS_PER_LOOP * 2  // fetch extra to compensate for rejects
+  let rawBatch: TaskRow[] = []
+  let fetchedSource = ''
 
   for (const src of sourcePriority) {
     const { data } = await supabase
       .from('roadmap_tasks')
-      .select('id, title, description, phase_id, metadata')
+      .select('id, title, description, phase_id, source, metadata')
       .in('status', ['pending', 'retry'])
       .eq('source', src)
       .order('id', { ascending: true })
-      .limit(MAX_TASKS_PER_LOOP)
+      .limit(FETCH_LIMIT)
     if (data?.length) {
-      taskBatch = data as TaskRow[]
+      rawBatch      = data as TaskRow[]
+      fetchedSource = src
       break
     }
   }
 
-  if (!taskBatch.length) {
+  if (!rawBatch.length) {
     const finalSpend = await getDailySpend()
     return NextResponse.json({
       status: 'idle', mode, tasks_run: 0, executed: [],
-      daily_spend: `$${finalSpend.toFixed(4)}`,
-      budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
-      cycle_ms: Date.now() - cycleStart,
-      timestamp: new Date().toISOString(),
+      daily_spend:   `$${finalSpend.toFixed(4)}`,
+      budget_left:   `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
+      cycle_ms:      Date.now() - cycleStart,
+      timestamp:     new Date().toISOString(),
+      authority:     getAuthorityStats(),
     })
   }
 
-  // Claim all tasks atomically: pending/retry → in_progress
-  const batch = taskBatch.slice(0, maxPerRun)
+  // ── CANONICAL AUTHORITY GATE ──────────────────────────────────────────────
+  // roadmap_master and javari_scanner tasks pass automatically.
+  // planner tasks are validated against active phase + module registry.
+  const { accepted, rejected, rejections } = filterToCanonical(rawBatch, activePhase)
+
+  // Persist rejections as 'blocked' in Supabase (fire-and-forget)
+  if (rejected.length > 0) {
+    persistRejections(rejected, rejections).catch(() => {/* non-fatal */})
+  }
+
+  const batch = accepted.slice(0, maxPerRun)
+
+  if (!batch.length) {
+    const finalSpend = await getDailySpend()
+    return NextResponse.json({
+      status:      'idle',
+      reason:      `all ${rawBatch.length} tasks rejected by canonical authority`,
+      mode,        tasks_run: 0, executed: [],
+      rejected:    rejected.length,
+      daily_spend: `$${finalSpend.toFixed(4)}`,
+      budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
+      cycle_ms:    Date.now() - cycleStart,
+      timestamp:   new Date().toISOString(),
+      authority:   getAuthorityStats(),
+    })
+  }
+
+  // Claim accepted batch: pending/retry → in_progress
   await supabase.from('roadmap_tasks')
     .update({ status: 'in_progress', updated_at: Date.now() })
     .in('id', batch.map(t => t.id))
 
-  // Execute all tasks concurrently — parallel AI calls, ~5s total vs 10×5s=50s sequential
+  // Execute all accepted tasks concurrently
+  const taskStartTime = Date.now()
   const taskPromises = batch.map(async (task) => {
-    const meta     = (task.metadata ?? {}) as Record<string, unknown>
-    const taskType = (meta.task_type as string) ?? detectType(task.title + ' ' + (task.description ?? ''))
+    const taskStart = Date.now()
+    const meta      = (task.metadata ?? {}) as Record<string, unknown>
+    const taskType  = (meta.task_type as string) ?? detectType(task.title + ' ' + (task.description ?? ''))
     try {
       const prompt = [
         `Task: ${task.title}`,
         task.description ? `Description: ${task.description}` : '',
         meta.target_url ? `Target URL: ${meta.target_url}` : '',
-        meta.milestone  ? `Milestone: ${meta.milestone}`  : '',
+        meta.milestone  ? `Milestone: ${meta.milestone}`   : '',
       ].filter(Boolean).join('\n')
 
       const result = await route(taskType as any, prompt, {
@@ -136,7 +173,9 @@ export async function GET() {
         await supabase.from('roadmap_tasks')
           .update({ status: 'pending', error: result.reason, updated_at: Date.now() })
           .eq('id', task.id)
-        return null
+        return { learning: { task_id: task.id, task_title: task.title, task_source: task.source,
+          task_type: taskType, status: 'blocked' as const, canonical_valid: true,
+          phase_id: task.phase_id ?? '', cycle_id: cycleId } }
       }
 
       // in_progress → completed
@@ -155,7 +194,7 @@ export async function GET() {
         status:       'complete',
         dry_run:      false,
         triggered_by: `cron_${mode.toLowerCase()}_loop`,
-        metadata:     { roadmap_task_id: task.id, task_type: taskType, mode },
+        metadata:     { roadmap_task_id: task.id, task_type: taskType, mode, cycle_id: cycleId },
         started_at:   new Date(cycleStart).toISOString(),
         completed_at: new Date().toISOString(),
         result:       { output: result.content.slice(0, 2000), model: result.model, cost: result.cost },
@@ -178,34 +217,112 @@ export async function GET() {
           .eq('status', 'pending')
       }
 
-      return { roadmap_task_id: task.id, title: task.title, task_type: taskType,
-               model: result.model, cost: result.cost, job_id: job?.id }
+      return {
+        roadmap_task_id: task.id,
+        title:    task.title,
+        task_type: taskType,
+        model:    result.model,
+        cost:     result.cost,
+        job_id:   job?.id,
+        learning: {
+          task_id:        task.id,
+          task_title:     task.title,
+          task_source:    task.source,
+          task_type:      taskType,
+          status:         'completed' as const,
+          model:          result.model,
+          cost:           result.cost,
+          duration_ms:    Date.now() - taskStart,
+          canonical_valid: true,
+          phase_id:       task.phase_id ?? '',
+          cycle_id:       cycleId,
+        },
+      }
 
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
-      // in_progress → retry on failure
       await supabase.from('roadmap_tasks')
         .update({ status: 'retry', error: msg, updated_at: Date.now() })
         .eq('id', task.id)
-      return { roadmap_task_id: task.id, title: task.title, error: msg }
+      return {
+        roadmap_task_id: task.id,
+        title:    task.title,
+        error:    msg,
+        learning: {
+          task_id:        task.id,
+          task_title:     task.title,
+          task_source:    task.source,
+          task_type:      taskType,
+          status:         'failed' as const,
+          error:          msg,
+          duration_ms:    Date.now() - taskStart,
+          canonical_valid: true,
+          phase_id:       task.phase_id ?? '',
+          cycle_id:       cycleId,
+        },
+      }
     }
   })
 
   const results = await Promise.allSettled(taskPromises)
+  const learningRecords: unknown[] = []
+
   for (const r of results) {
-    if (r.status === 'fulfilled' && r.value) executed.push(r.value)
+    if (r.status === 'fulfilled' && r.value) {
+      const val = r.value as Record<string, unknown>
+      executed.push(val)
+      if (val.learning) learningRecords.push(val.learning)
+    }
+  }
+
+  // Add rejected tasks to learning records
+  for (let i = 0; i < rejected.length; i++) {
+    learningRecords.push({
+      task_id:        rejected[i].id,
+      task_title:     rejected[i].title,
+      task_source:    rejected[i].source,
+      task_type:      'unknown',
+      status:         'rejected',
+      canonical_valid: false,
+      phase_id:       rejected[i].phase_id ?? '',
+      cycle_id:       cycleId,
+    })
+  }
+
+  // Fire-and-forget learning write
+  if (learningRecords.length > 0) {
+    const baseUrl = process.env.NEXT_PUBLIC_APP_URL ?? 'https://javari-ai.vercel.app'
+    fetch(`${baseUrl}/api/javari/learning/update`, {
+      method:  'POST',
+      headers: {
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${process.env.CRON_SECRET ?? 'javari-cron-2025-phase2-autonomous'}`,
+      },
+      body: JSON.stringify({
+        records:  learningRecords,
+        cycle_ms: Date.now() - taskStartTime,
+      }),
+    }).catch(() => {/* non-fatal */})
   }
 
   const finalSpend = await getDailySpend()
+  const authorityStats = getAuthorityStats()
+
   return NextResponse.json({
     status:      executed.length > 0 ? 'executed' : 'idle',
     mode,
+    active_phase: activePhase,
     tasks_run:   executed.length,
     executed,
+    rejected_by_authority: rejected.length,
+    canonical_rate: batch.length > 0
+      ? Math.round(100 * batch.length / rawBatch.length)
+      : 0,
     daily_spend: `$${finalSpend.toFixed(4)}`,
     budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
     cycle_ms:    Date.now() - cycleStart,
     timestamp:   new Date().toISOString(),
+    authority:   authorityStats,
   })
 }
 

@@ -1,6 +1,6 @@
 // app/api/autonomy/status/route.ts
-// Javari OS — Autonomy Status
-// ALL data from roadmap_master (275 canonical tasks). Trusted, stable, deterministic.
+// Javari OS — Trusted Status from roadmap_master
+// Shows VERIFIED vs COMPLETED distinction — the system is not done until verified.
 // Tuesday, March 17, 2026
 import { NextResponse }  from 'next/server'
 import { createClient }  from '@supabase/supabase-js'
@@ -21,7 +21,6 @@ export async function GET() {
   try {
     const supabase = db()
 
-    // Load config
     const { data: configRows } = await supabase
       .from('javari_system_config')
       .select('key,value')
@@ -29,117 +28,128 @@ export async function GET() {
       (configRows ?? []).map((r: { key: string; value: string }) => [r.key, r.value])
     )
 
-    // roadmap_master — canonical task counts (TOTAL = 275 fixed)
+    // Load all roadmap_master tasks
     const { data: allTasks } = await supabase
       .from('roadmap_master')
-      .select('id, phase, status, priority, module, module_family, title, executed_at, execution_model, execution_cost, verified')
+      .select('id, phase, status, priority, module, module_family, title, executed_at, execution_model, execution_cost, verified, retry_count')
       .order('phase', { ascending: true })
 
     const tasks = allTasks ?? []
-    const TOTAL = tasks.length
+    const TOTAL = tasks.length  // 275 — canonical fixed
 
-    // Status breakdown
-    const statusMap: Record<string, number> = {}
-    for (const t of tasks) {
-      statusMap[t.status] = (statusMap[t.status] ?? 0) + 1
-    }
+    // Status counts
+    const completed  = tasks.filter(t => t.status === 'completed').length
+    const verified   = tasks.filter(t => t.verified === true).length
+    const inProgress = tasks.filter(t => t.status === 'in_progress').length
+    const pending    = tasks.filter(t => t.status === 'pending').length
+    const blocked    = tasks.filter(t => t.status === 'blocked').length
 
-    // Phase breakdown
-    const phaseMap: Record<number, { total: number; completed: number; in_progress: number; pending: number }> = {}
+    // Unverified completed tasks (completed but not yet verified)
+    const unverifiedCompleted = tasks.filter(t => t.status === 'completed' && t.verified === false).length
+
+    const pctComplete = TOTAL > 0 ? Math.round(100 * completed / TOTAL) : 0
+    const pctVerified = TOTAL > 0 ? Math.round(100 * verified  / TOTAL) : 0
+    const pctTrusted  = pctVerified  // "trusted" = verified
+
+    // Phase breakdown with verified counts
+    const phaseMap: Record<number, {
+      total: number; completed: number; verified: number; in_progress: number; pending: number; blocked: number; pct: number; pct_verified: number
+    }> = {}
     for (const t of tasks) {
       const p = t.phase as number
-      if (!phaseMap[p]) phaseMap[p] = { total: 0, completed: 0, in_progress: 0, pending: 0 }
+      if (!phaseMap[p]) phaseMap[p] = { total: 0, completed: 0, verified: 0, in_progress: 0, pending: 0, blocked: 0, pct: 0, pct_verified: 0 }
       phaseMap[p].total++
       if (t.status === 'completed')   phaseMap[p].completed++
+      if (t.verified === true)        phaseMap[p].verified++
       if (t.status === 'in_progress') phaseMap[p].in_progress++
       if (t.status === 'pending')     phaseMap[p].pending++
+      if (t.status === 'blocked')     phaseMap[p].blocked++
+    }
+    for (const p of Object.keys(phaseMap)) {
+      const pd = phaseMap[Number(p)]
+      pd.pct          = pd.total > 0 ? Math.round(100 * pd.completed / pd.total) : 0
+      pd.pct_verified = pd.total > 0 ? Math.round(100 * pd.verified  / pd.total) : 0
     }
 
-    // Completion metrics
-    const completed   = statusMap['completed']   ?? 0
-    const inProgress  = statusMap['in_progress'] ?? 0
-    const pending     = statusMap['pending']      ?? 0
-    const pctComplete = TOTAL > 0 ? Math.round(100 * completed / TOTAL) : 0
-    const pctCoverage = TOTAL > 0 ? Math.round(100 * (completed + inProgress) / TOTAL) : 0
-
-    // Next 10 tasks queue (pending, phase-ordered)
+    // Next queue: pending tasks with dependencies met (simplified — top 10 by phase)
     const nextQueue = tasks
       .filter(t => t.status === 'pending')
       .slice(0, 10)
       .map(t => ({ id: t.id, phase: t.phase, module: t.module, title: t.title, priority: t.priority }))
 
-    // Recent 10 executions
+    // Unverified tasks requiring attention (completed but verified=false)
+    const needsVerification = tasks
+      .filter(t => t.status === 'completed' && t.verified === false && t.execution_model)
+      .slice(0, 10)
+      .map(t => ({ id: t.id, phase: t.phase, module: t.module, title: t.title, execution_model: t.execution_model }))
+
+    // Recent executions from log
     const { data: recentExec } = await supabase
       .from('javari_execution_log')
-      .select('roadmap_task_id, task_type, model, cost_usd, duration_ms, status, executed_at, result_summary')
+      .select('roadmap_task_id, task_type, model, cost_usd, duration_ms, status, verification, executed_at')
       .order('executed_at', { ascending: false })
       .limit(10)
 
     // Budget
-    const budgetSpent  = await getDailySpend()
-    const budgetDaily  = parseFloat(config['BUILD_BUDGET_DAILY_USD'] ?? '1.00')
-    const budgetLeft   = Math.max(0, budgetDaily - budgetSpent)
-    const budgetPct    = Math.min(100, Math.round(100 * budgetSpent / budgetDaily))
+    const budgetSpent = await getDailySpend()
+    const budgetDaily = parseFloat(config['BUILD_BUDGET_DAILY_USD'] ?? '1.00')
+    const budgetLeft  = Math.max(0, budgetDaily - budgetSpent)
+    const budgetPct   = Math.min(100, Math.round(100 * budgetSpent / budgetDaily))
 
-    // Last cycle learning stats
-    const lastCycleRaw = config['LEARNING_LAST_CYCLE']
-    const lastCycle = lastCycleRaw
-      ? (() => { try { return JSON.parse(lastCycleRaw) } catch { return null } })()
-      : null
+    // Last cycle
+    const lastCycle = (() => {
+      try { return config['LEARNING_LAST_CYCLE'] ? JSON.parse(config['LEARNING_LAST_CYCLE']) : null }
+      catch { return null }
+    })()
 
     return NextResponse.json({
-      ok:   true,
+      ok:     true,
       source: 'roadmap_master',
+      verification_gated: true,
 
-      // Core metrics — trusted, stable
+      // Core numbers — stable, trusted
       canonical: {
-        total:       TOTAL,
+        total:               TOTAL,
         completed,
-        in_progress: inProgress,
+        verified,
+        unverified_completed: unverifiedCompleted,
+        in_progress:         inProgress,
         pending,
-        pct_complete: pctComplete,
-        pct_coverage: pctCoverage,
+        blocked,
+        pct_complete:        pctComplete,
+        pct_verified:        pctVerified,
+        pct_trusted:         pctTrusted,
       },
 
-      // Phase breakdown
       phases: Object.fromEntries(
-        Object.entries(phaseMap).map(([phase, data]) => [
-          phase,
-          {
-            ...data,
-            pct: data.total > 0 ? Math.round(100 * data.completed / data.total) : 0,
-          },
-        ])
+        Object.entries(phaseMap).map(([p, d]) => [p, d])
       ),
 
-      // Next tasks queue
-      next_queue: nextQueue,
+      next_queue:         nextQueue,
+      needs_verification: needsVerification,
 
-      // Recent executions
       recent_executions: (recentExec ?? []).map(e => ({
-        id:          e.roadmap_task_id,
-        type:        e.task_type,
-        model:       e.model,
-        cost:        e.cost_usd,
-        duration_ms: e.duration_ms,
-        status:      e.status,
-        executed_at: e.executed_at,
+        id:           e.roadmap_task_id,
+        type:         e.task_type,
+        model:        e.model,
+        cost:         e.cost_usd,
+        duration_ms:  e.duration_ms,
+        status:       e.status,
+        verification: e.verification,
+        executed_at:  e.executed_at,
       })),
 
-      // System state
       system: {
-        mode:           config['SYSTEM_MODE']          ?? 'BUILD',
-        active_phase:   parseInt(config['ACTIVE_PHASE'] ?? '2', 10),
-        budget_daily:   budgetDaily,
-        budget_spent:   budgetSpent,
-        budget_left:    budgetLeft,
-        budget_pct:     budgetPct,
+        mode:         config['SYSTEM_MODE']    ?? 'BUILD',
+        active_phase: parseInt(config['ACTIVE_PHASE'] ?? '2', 10),
+        budget_daily:  budgetDaily,
+        budget_spent:  budgetSpent,
+        budget_left:   budgetLeft,
+        budget_pct:    budgetPct,
       },
 
-      // Last learning cycle
       last_cycle: lastCycle,
-
-      timestamp: new Date().toISOString(),
+      timestamp:  new Date().toISOString(),
     })
 
   } catch (err: unknown) {

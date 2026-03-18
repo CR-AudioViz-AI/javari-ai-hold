@@ -92,8 +92,8 @@ function Avatar({ state }: { state: AvState }) {
     <div className="flex flex-col items-center gap-3 select-none">
       {/* Portrait image with animated state ring */}
       <div className={`relative rounded-2xl ring-2 transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
-        style={{ width: '100%', maxWidth: '420px', height: '420px', background: '#ffffff' }}>
-        {/* Hard white background — two layers ensure no transparency bleed */}
+        style={{ width: '100%', maxWidth: '420px', aspectRatio: '3 / 4', background: '#ffffff' }}>
+        {/* Hard white background — ensures transparent PNG renders on white */}
         <div className="absolute inset-0 rounded-2xl" style={{ background: '#ffffff', zIndex: 0 }} />
         {/* The real Javari portrait */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -396,12 +396,12 @@ export default function JavariOSPage() {
         {/* ── HEADER ───────────────────────────────────────────────────── */}
         <header className="flex-shrink-0 relative z-20 flex items-center px-5 py-2 border-b border-zinc-800/60 bg-black/60 backdrop-blur-sm gap-4">
           {/* Javari AI logo in header — white pill container, responsive size */}
-          <div className="flex-shrink-0 bg-[#f8fafc] rounded-md px-2 py-1 flex items-center">
+          <div className="flex-shrink-0 bg-[#f8fafc] rounded-md px-2 py-1 flex items-center max-h-full">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/javari-logo.png"
               alt="Javari AI"
-              className="h-10 md:h-12 w-auto object-contain"
+              className="h-8 md:h-9 max-h-full w-auto object-contain"
               draggable={false}
             />
           </div>

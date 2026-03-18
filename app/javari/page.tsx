@@ -89,14 +89,14 @@ function Avatar({ state }: { state: AvState }) {
   return (
     <div className="flex flex-col items-center gap-3 select-none">
       {/* Portrait image with animated state ring */}
-      <div className={`relative rounded-2xl overflow-hidden ring-2 transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
+      <div className={`relative rounded-2xl overflow-hidden ring-2 transition-all duration-500 bg-white ${ringStyle[state]} ${glowStyle[state]}`}
         style={{ width: '96px', height: '96px' }}>
         {/* The real Javari portrait */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
-          className="w-full h-full object-cover object-top"
+          className="w-full h-full object-contain object-center p-1"
           draggable={false}
         />
         {/* State overlay — subtle tint on active states */}
@@ -388,13 +388,14 @@ export default function JavariOSPage() {
 
         {/* ── HEADER ───────────────────────────────────────────────────── */}
         <header className="flex-shrink-0 relative z-20 flex items-center px-5 py-2 border-b border-zinc-800/60 bg-black/60 backdrop-blur-sm gap-4">
-          {/* Logo + title */}
-          <div className="flex items-center gap-2.5 flex-shrink-0">
-            <div className="w-7 h-7 rounded bg-gradient-to-br from-violet-600 to-violet-900 flex items-center justify-center">
-              <Zap className="w-4 h-4 text-white" />
-            </div>
-            <span className="font-mono text-sm tracking-[0.3em] text-zinc-200 uppercase">JAVARI OS</span>
-          </div>
+          {/* Javari AI logo in header */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src="/javari-logo.png"
+            alt="Javari AI"
+            className="h-8 w-auto object-contain flex-shrink-0"
+            draggable={false}
+          />
 
           <div className="w-px h-5 bg-zinc-800" />
 
@@ -463,18 +464,6 @@ export default function JavariOSPage() {
           <Q id="q1" label="Q1 · IDENTITY" glow="violet"
             className="order-4 md:order-1">
             <div className="h-full flex flex-col items-center justify-between p-5 py-6">
-
-              {/* Javari AI logo */}
-              <div className="flex flex-col items-center gap-1.5">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src="/javari-logo.png"
-                  alt="Javari AI"
-                  className="h-10 w-auto object-contain"
-                  draggable={false}
-                />
-                <p className="font-mono text-[9px] tracking-[0.35em] text-zinc-600 uppercase">Javari AI</p>
-              </div>
 
               {/* Avatar */}
               <Avatar state={avState} />

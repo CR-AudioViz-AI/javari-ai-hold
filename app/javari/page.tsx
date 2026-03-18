@@ -49,14 +49,16 @@ interface ExecRow {
 }
 
 interface SysStatus {
-  total:    number
-  completed:number
-  verified: number
-  pending:  number
-  phase:    number
-  mode:     string
-  pct:      number
-  budget:   number
+  total:       number
+  completed:   number
+  verified:    number
+  pending:     number
+  phase:       number
+  mode:        string
+  pct:         number
+  budget:      number
+  budgetSpent: number
+  budgetTotal: number
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,13 +92,13 @@ function Avatar({ state }: { state: AvState }) {
     <div className="flex flex-col items-center gap-3 select-none">
       {/* Portrait image with animated state ring */}
       <div className={`relative rounded-2xl overflow-hidden ring-2 transition-all duration-500 bg-white ${ringStyle[state]} ${glowStyle[state]}`}
-        style={{ width: '96px', height: '96px' }}>
+        style={{ width: '100%', maxWidth: '380px', height: '380px' }}>
         {/* The real Javari portrait */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
-          className="w-full h-full object-contain object-center p-1"
+          className="w-full h-full object-contain object-center"
           draggable={false}
         />
         {/* State overlay — subtle tint on active states */}
@@ -221,7 +223,9 @@ export default function JavariOSPage() {
         phase:     data.system?.active_phase ?? 2,
         mode:      data.system?.mode         ?? 'BUILD',
         pct:       c.pct_verified            ?? 0,
-        budget:    data.system?.budget_left  ?? 0,
+        budget:      data.system?.budget_left  ?? 0,
+        budgetSpent: data.system?.budget_spent ?? 0,
+        budgetTotal: data.system?.budget_daily ?? 1.00,
       })
       // Recent executions
       const recent: Array<Record<string,unknown>> = data.recent_executions ?? []
@@ -393,7 +397,7 @@ export default function JavariOSPage() {
           <img
             src="/javari-logo.png"
             alt="Javari AI"
-            className="h-8 w-auto object-contain flex-shrink-0"
+            className="h-5 w-auto object-contain flex-shrink-0"
             draggable={false}
           />
 
@@ -457,13 +461,13 @@ export default function JavariOSPage() {
         <main className="flex-1 min-h-0 relative z-10
           grid gap-px bg-zinc-800/40
           grid-cols-1 grid-rows-[auto_1fr_auto_auto]
-          md:grid-cols-2 md:grid-rows-2
+          md:grid-cols-[minmax(0,1fr)_minmax(0,2fr)] md:grid-rows-2
         ">
 
           {/* ── Q1: IDENTITY / AVATAR ─────────────────────── top-left ── */}
           <Q id="q1" label="Q1 · IDENTITY" glow="violet"
             className="order-4 md:order-1">
-            <div className="h-full flex flex-col items-center justify-between p-5 py-6">
+            <div className="h-full flex flex-col items-center gap-4 p-4 overflow-y-auto">
 
               {/* Avatar */}
               <Avatar state={avState} />
@@ -477,7 +481,8 @@ export default function JavariOSPage() {
                       { k: 'TASKS',    v: `${sysStatus.completed} / ${sysStatus.total}`, c: 'text-zinc-300' },
                       { k: 'VERIFIED', v: `${sysStatus.pct}%`,                     c: 'text-emerald-500' },
                       { k: 'PENDING',  v: `${sysStatus.pending}`,                  c: 'text-amber-600' },
-                      { k: 'BUDGET',   v: `$${sysStatus.budget.toFixed(3)}`,       c: 'text-zinc-500' },
+                      { k: 'SPENT',    v: `$${(sysStatus.budgetSpent ?? 0).toFixed(4)}`, c: 'text-amber-600' },
+                      { k: 'REMAINING', v: `$${(sysStatus.budget ?? 0).toFixed(4)}`,        c: 'text-emerald-600' },
                     ].map(row => (
                       <div key={row.k} className="flex items-center justify-between px-1">
                         <span className="text-[9px] tracking-[0.2em] text-zinc-700">{row.k}</span>

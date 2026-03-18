@@ -1,20 +1,23 @@
 // app/api/javari/team/route.ts
-// Javari Team API — multi-model ensemble (planner → builder → validator)
-// First-turn: neutral greeting. Subsequent turns: full ensemble.
+// Javari Team API — multi-model ensemble (planner -> builder -> validator)
+// First-turn: neutral greeting only. Subsequent turns: full ensemble.
 // Tuesday, March 17, 2026
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 
 export const dynamic = 'force-dynamic'
 
+// Opening message — neutral, no assumptions
 const SYSTEM_FIRST = [
   'You are Javari AI, a helpful AI assistant.',
-  'This is the user's first message. Respond with a warm, brief, open-ended greeting only.',
-  'Do NOT mention any specific product, platform, ecosystem, or technology.',
+  'This is the opening message of a new session.',
+  'Respond with a warm, brief, open-ended greeting only.',
+  'Do NOT mention any product, platform, ecosystem, or technology.',
   'Simply welcome them and ask how you can help.',
-  'One or two short sentences only.',
+  'One or two short sentences maximum.',
 ].join('\n')
 
+// Council members — adapt to what user needs
 const SYSTEM = [
   'You are part of Javari AI — "Your Story. Our Design."',
   'Be precise, direct, and adapt to what the user actually needs.',
@@ -32,17 +35,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'message required' }, { status: 400 })
     }
 
-    // First turn: skip ensemble, return simple greeting
+    // First turn: skip expensive ensemble, return simple greeting
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn = priorUserMessages.length === 0
 
     if (isFirstTurn) {
       const result = await route('chat', message, { systemPrompt: SYSTEM_FIRST })
       return NextResponse.json({
-        content:  result.content,
-        model:    result.model,
-        tier:     result.tier,
-        ensemble: [],
+        content:    result.content,
+        model:      result.model,
+        tier:       result.tier,
+        ensemble:   [],
         total_cost: result.cost,
       })
     }

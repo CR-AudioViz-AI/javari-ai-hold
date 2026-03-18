@@ -9,20 +9,22 @@ import { detectTaskType } from '@/lib/javari/router'
 
 export const dynamic = 'force-dynamic'
 
-// System prompt for first interaction — no ecosystem context, no assumed scope
+// First interaction — neutral, no context assumed, no product mentions
 const SYSTEM_FIRST = [
   'You are Javari AI, a helpful AI assistant.',
-  'This is the user's first message. Respond with a warm, brief, open-ended greeting only.',
-  'Do NOT mention any specific product, platform, ecosystem, roadmap, or technology.',
+  'This is the opening message of a new session.',
+  'Respond with a warm, brief, open-ended greeting only.',
+  'Do NOT mention any product, platform, ecosystem, roadmap, or technology.',
   'Do NOT assume what the user needs.',
   'Simply welcome them and ask how you can help.',
-  'Keep the greeting to one or two short sentences maximum.',
+  'One or two short sentences maximum.',
 ].join('\n')
 
-// System prompt for subsequent turns — adapt to the conversation
+// Subsequent turns — adapt to what the user has actually asked about
 const SYSTEM_CONTEXTUAL = [
-  'You are Javari AI — "Your Story. Our Design."',
-  'You are a capable AI assistant. Be direct, helpful, and adapt to what the user actually needs.',
+  'You are Javari AI — helpful, direct, and capable.',
+  'Your mission: "Your Story. Our Design."',
+  'Adapt your response to what the user actually needs.',
   'Do not assume internal context unless the user has explicitly provided it.',
 ].join('\n')
 
@@ -38,12 +40,12 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'message required' }, { status: 400 })
     }
 
-    // First turn = no prior user messages in history
+    // First turn detection: no prior user messages in history
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn = priorUserMessages.length === 0
 
     const systemPrompt = isFirstTurn ? SYSTEM_FIRST : SYSTEM_CONTEXTUAL
-    const taskType     = isFirstTurn ? 'chat' : detectTaskType(message) as any
+    const taskType     = isFirstTurn ? 'chat' : (detectTaskType(message) as any)
 
     const result = await route(taskType, message, { systemPrompt })
 

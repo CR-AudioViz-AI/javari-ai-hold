@@ -431,7 +431,7 @@ export default function JavariOSPage() {
         {/* ── HEADER ───────────────────────────────────────────────────── */}
         <header className="flex-shrink-0 relative z-20 flex items-center px-5 border-b border-zinc-800/60 bg-black/60 backdrop-blur-sm gap-4" style={{ height: '56px', minHeight: '56px', maxHeight: '56px' }}>
           {/* Javari AI logo in header — white pill container, responsive size */}
-          <div className="flex-shrink-0 bg-[#f8fafc] rounded-md px-2 py-1 flex items-center" style={{ height: '40px' }}>
+          <div className="flex-shrink-0 flex items-center" style={{ height: '40px' }}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/javari-logo.png"

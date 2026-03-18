@@ -436,7 +436,7 @@ export default function JavariOSPage() {
             <img
               src="/javari-logo.png"
               alt="Javari AI"
-              style={{ height: '32px', width: 'auto', maxHeight: '32px', objectFit: 'contain', display: 'block' }}
+              style={{ height: '40px', width: 'auto', maxHeight: '40px', objectFit: 'contain', display: 'block' }}
               draggable={false}
             />
           </div>

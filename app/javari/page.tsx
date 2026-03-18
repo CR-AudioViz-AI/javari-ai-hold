@@ -92,17 +92,16 @@ function Avatar({ state }: { state: AvState }) {
     <div className="flex flex-col items-center gap-3 select-none">
       {/* Portrait image with animated state ring */}
       <div className={`relative rounded-2xl ring-2 transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
-        style={{ width: '100%', maxWidth: '420px', aspectRatio: '3 / 4', background: '#ffffff' }}>
-        {/* Hard white background — ensures transparent PNG renders on white */}
-        <div className="absolute inset-0 rounded-2xl" style={{ background: '#ffffff', zIndex: 0 }} />
-        {/* The real Javari portrait */}
+        style={{ width: '100%', maxWidth: '420px', height: '520px', flexShrink: 0, background: '#ffffff' }}>
+        {/* White background layer — zIndex 0 — no transparency bleed */}
+        <div style={{ position: 'absolute', inset: 0, background: '#ffffff', zIndex: 0, borderRadius: 'inherit' }} />
+        {/* Portrait — zIndex 1 — above white layer */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
-          className="absolute inset-0 w-full h-full object-contain object-bottom"
+          style={{ position: 'absolute', bottom: 0, left: 0, width: '100%', height: '100%', objectFit: 'contain', objectPosition: 'bottom', zIndex: 1 }}
           draggable={false}
-          style={{ position: 'absolute', zIndex: 1 }}
         />
         {/* State overlay — subtle tint on active states */}
         <div className={`absolute inset-0 transition-all duration-300 ${
@@ -394,14 +393,14 @@ export default function JavariOSPage() {
           style={{ backgroundImage: 'repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.12) 3px,rgba(0,0,0,0.12) 4px)' }} />
 
         {/* ── HEADER ───────────────────────────────────────────────────── */}
-        <header className="flex-shrink-0 relative z-20 flex items-center px-5 py-2 border-b border-zinc-800/60 bg-black/60 backdrop-blur-sm gap-4">
+        <header className="flex-shrink-0 relative z-20 flex items-center px-5 border-b border-zinc-800/60 bg-black/60 backdrop-blur-sm gap-4" style={{ height: '56px', minHeight: '56px', maxHeight: '56px' }}>
           {/* Javari AI logo in header — white pill container, responsive size */}
-          <div className="flex-shrink-0 bg-[#f8fafc] rounded-md px-2 py-1 flex items-center max-h-full">
+          <div className="flex-shrink-0 bg-[#f8fafc] rounded-md px-2 py-1 flex items-center" style={{ height: '40px' }}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/javari-logo.png"
               alt="Javari AI"
-              className="h-8 md:h-9 max-h-full w-auto object-contain"
+              style={{ height: '32px', width: 'auto', maxHeight: '32px', objectFit: 'contain', display: 'block' }}
               draggable={false}
             />
           </div>
@@ -472,7 +471,7 @@ export default function JavariOSPage() {
           {/* ── Q1: IDENTITY / AVATAR ─────────────────────── top-left ── */}
           <Q id="q1" label="Q1 · IDENTITY" glow="violet"
             className="order-4 md:order-1">
-            <div className="h-full flex flex-col items-center gap-4 p-4 overflow-y-auto">
+            <div className="h-full flex flex-col items-center gap-4 p-4 overflow-y-auto" style={{ minHeight: '500px', justifyContent: 'flex-start' }}>
 
               {/* Avatar */}
               <Avatar state={avState} />

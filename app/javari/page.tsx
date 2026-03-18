@@ -99,21 +99,11 @@ function Avatar({ state }: { state: AvState }) {
           maxWidth:    '360px',
           aspectRatio: '3 / 4',
           flexShrink:  1,
-          background:  '#ffffff',
           borderRadius: '1rem',
           overflow:    'visible',
         }}
       >
-        {/* White fill — prevents transparency bleed from the PNG */}
-        <div style={{
-          position:     'absolute',
-          inset:        0,
-          background:   '#ffffff',
-          zIndex:       0,
-          borderRadius: 'inherit',
-          overflow:     'hidden',
-        }} />
-        {/* Portrait image — centered, relative positioning, fills wrapper */}
+        {/* Portrait — clean transparent PNG, composites on dark UI background */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"

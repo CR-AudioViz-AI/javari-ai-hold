@@ -93,18 +93,20 @@ function Avatar({ state }: { state: AvState }) {
       {/* Portrait image with animated state ring */}
       <div className={`relative rounded-2xl overflow-hidden ring-2 transition-all duration-500 bg-white ${ringStyle[state]} ${glowStyle[state]}`}
         style={{ width: '100%', maxWidth: '380px', height: '380px' }}>
+        {/* Solid white fill — ensures transparent PNG shows on white */}
+        <div className="absolute inset-0 bg-white" />
         {/* The real Javari portrait */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
-          className="w-full h-full object-contain object-center"
+          className="relative w-full h-full object-contain object-bottom"
           draggable={false}
         />
         {/* State overlay — subtle tint on active states */}
         <div className={`absolute inset-0 transition-all duration-300 ${
-          state === 'thinking'   ? 'bg-violet-900/20' :
-          state === 'executing'  ? 'bg-amber-900/15'  :
+          state === 'thinking'   ? 'bg-violet-900/10' :
+          state === 'executing'  ? 'bg-amber-900/08'  :
                                    'bg-transparent'
         }`} />
         {/* State dot — bottom-right corner */}
@@ -397,7 +399,7 @@ export default function JavariOSPage() {
           <img
             src="/javari-logo.png"
             alt="Javari AI"
-            className="h-5 w-auto object-contain flex-shrink-0"
+            className="h-7 w-auto object-contain flex-shrink-0"
             draggable={false}
           />
 

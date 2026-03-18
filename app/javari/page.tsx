@@ -91,17 +91,18 @@ function Avatar({ state }: { state: AvState }) {
   return (
     <div className="flex flex-col items-center gap-3 select-none">
       {/* Portrait image with animated state ring */}
-      <div className={`relative rounded-2xl overflow-hidden ring-2 transition-all duration-500 bg-white ${ringStyle[state]} ${glowStyle[state]}`}
-        style={{ width: '100%', maxWidth: '380px', height: '380px' }}>
-        {/* Solid white fill — ensures transparent PNG shows on white */}
-        <div className="absolute inset-0 bg-white" />
+      <div className={`relative rounded-2xl ring-2 transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
+        style={{ width: '100%', maxWidth: '420px', height: '420px', background: '#ffffff' }}>
+        {/* Hard white background — two layers ensure no transparency bleed */}
+        <div className="absolute inset-0 rounded-2xl" style={{ background: '#ffffff', zIndex: 0 }} />
         {/* The real Javari portrait */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
-          className="relative w-full h-full object-contain object-bottom"
+          className="absolute inset-0 w-full h-full object-contain object-bottom"
           draggable={false}
+          style={{ position: 'absolute', zIndex: 1 }}
         />
         {/* State overlay — subtle tint on active states */}
         <div className={`absolute inset-0 transition-all duration-300 ${
@@ -394,14 +395,16 @@ export default function JavariOSPage() {
 
         {/* ── HEADER ───────────────────────────────────────────────────── */}
         <header className="flex-shrink-0 relative z-20 flex items-center px-5 py-2 border-b border-zinc-800/60 bg-black/60 backdrop-blur-sm gap-4">
-          {/* Javari AI logo in header */}
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/javari-logo.png"
-            alt="Javari AI"
-            className="h-7 w-auto object-contain flex-shrink-0"
-            draggable={false}
-          />
+          {/* Javari AI logo in header — white pill container, responsive size */}
+          <div className="flex-shrink-0 bg-[#f8fafc] rounded-md px-2 py-1 flex items-center">
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/javari-logo.png"
+              alt="Javari AI"
+              className="h-10 md:h-12 w-auto object-contain"
+              draggable={false}
+            />
+          </div>
 
           <div className="w-px h-5 bg-zinc-800" />
 

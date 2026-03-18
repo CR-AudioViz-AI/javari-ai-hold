@@ -72,48 +72,54 @@ const AGENT_CFG = {
 // Avatar: pure CSS animated, state-driven
 // ─────────────────────────────────────────────────────────────────────────────
 function Avatar({ state }: { state: AvState }) {
-  const rings: Record<AvState, { outer: string; mid: string; core: string; dot: string }> = {
-    idle:       { outer: 'border-zinc-800',          mid: 'border-zinc-800',          core: 'bg-zinc-900',     dot: 'opacity-0' },
-    thinking:   { outer: 'border-violet-500/50',     mid: 'border-violet-700/40 av-spin', core: 'bg-violet-950/80', dot: 'opacity-100 bg-violet-400 av-blink' },
-    responding: { outer: 'border-violet-400/70',     mid: 'border-violet-600/50',     core: 'bg-violet-900/70', dot: 'opacity-100 bg-violet-300' },
-    executing:  { outer: 'border-amber-500/60 av-blink', mid: 'border-amber-600/40', core: 'bg-amber-950/60',  dot: 'opacity-100 bg-amber-400 av-blink' },
+  // State-driven ring color + glow around the portrait
+  const ringStyle: Record<AvState, string> = {
+    idle:       'ring-zinc-800/60',
+    thinking:   'ring-violet-500/60 av-blink',
+    responding: 'ring-violet-400/80',
+    executing:  'ring-amber-500/70 av-blink',
   }
-  const r = rings[state]
+  const glowStyle: Record<AvState, string> = {
+    idle:       '',
+    thinking:   'shadow-[0_0_24px_rgba(139,92,246,0.35)]',
+    responding: 'shadow-[0_0_20px_rgba(139,92,246,0.25)]',
+    executing:  'shadow-[0_0_24px_rgba(245,158,11,0.30)]',
+  }
 
   return (
-    <div className="flex flex-col items-center gap-4 select-none">
-      {/* Rings */}
-      <div className="relative w-28 h-28">
-        {/* Outer ring */}
-        <div className={`absolute inset-0 rounded-full border-2 transition-all duration-500 ${r.outer}`} />
-        {/* Middle ring */}
-        <div className={`absolute inset-4 rounded-full border transition-all duration-700 ${r.mid}`} />
-        {/* Core */}
-        <div className={`absolute inset-8 rounded-full flex items-center justify-center transition-all duration-300 ${r.core}`}>
-          <Zap className={`w-6 h-6 transition-colors duration-300 ${
-            state === 'idle'       ? 'text-zinc-700'              :
-            state === 'thinking'   ? 'text-violet-400 av-blink'   :
-            state === 'responding' ? 'text-violet-300'             :
-                                     'text-amber-400 av-blink'
-          }`} />
-        </div>
-        {/* Orbit dot top */}
-        <div className={`absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 rounded-full transition-all duration-300 ${r.dot}`} />
-        {/* Orbit dot right */}
-        <div className={`absolute top-1/2 -right-1 -translate-y-1/2 w-1.5 h-1.5 rounded-full transition-all duration-300 ${r.dot}`}
-          style={{ animationDelay: '0.4s' }} />
-        {/* Orbit dot bottom */}
-        <div className={`absolute -bottom-1 left-1/2 -translate-x-1/2 w-1 h-1 rounded-full transition-all duration-300 ${r.dot}`}
-          style={{ animationDelay: '0.8s' }} />
+    <div className="flex flex-col items-center gap-3 select-none">
+      {/* Portrait image with animated state ring */}
+      <div className={`relative rounded-2xl overflow-hidden ring-2 transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
+        style={{ width: '96px', height: '96px' }}>
+        {/* The real Javari portrait */}
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img
+          src="/javari-portrait.png"
+          alt="Javari AI"
+          className="w-full h-full object-cover object-top"
+          draggable={false}
+        />
+        {/* State overlay — subtle tint on active states */}
+        <div className={`absolute inset-0 transition-all duration-300 ${
+          state === 'thinking'   ? 'bg-violet-900/20' :
+          state === 'executing'  ? 'bg-amber-900/15'  :
+                                   'bg-transparent'
+        }`} />
+        {/* State dot — bottom-right corner */}
+        <div className={`absolute bottom-1.5 right-1.5 w-2.5 h-2.5 rounded-full border border-black/40 transition-all duration-300 ${
+          state === 'idle'       ? 'bg-zinc-600'    :
+          state === 'thinking'   ? 'bg-violet-400 av-blink' :
+          state === 'responding' ? 'bg-emerald-400' :
+                                   'bg-amber-400 av-blink'
+        }`} />
       </div>
 
-      {/* Name */}
-      <div className="text-center space-y-1">
-        <p className="font-mono text-base tracking-[0.3em] text-zinc-200 uppercase">Javari</p>
-        <p className={`font-mono text-xs tracking-[0.25em] transition-colors duration-300 ${
-          state === 'idle'       ? 'text-zinc-700'             :
-          state === 'thinking'   ? 'text-violet-500 av-blink'  :
-          state === 'responding' ? 'text-violet-400'            :
+      {/* State label */}
+      <div className="text-center">
+        <p className={`font-mono text-[10px] tracking-[0.25em] transition-colors duration-300 ${
+          state === 'idle'       ? 'text-zinc-700'            :
+          state === 'thinking'   ? 'text-violet-500 av-blink' :
+          state === 'responding' ? 'text-violet-400'           :
                                    'text-amber-500 av-blink'
         }`}>{state.toUpperCase()}</p>
       </div>
@@ -458,12 +464,16 @@ export default function JavariOSPage() {
             className="order-4 md:order-1">
             <div className="h-full flex flex-col items-center justify-between p-5 py-6">
 
-              {/* Logo mark */}
-              <div className="flex flex-col items-center gap-2">
-                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-violet-700 to-violet-950 flex items-center justify-center ring-1 ring-violet-800/60">
-                  <Zap className="w-5 h-5 text-violet-300" />
-                </div>
-                <p className="font-mono text-[10px] tracking-[0.4em] text-zinc-500 uppercase">Javari AI</p>
+              {/* Javari AI logo */}
+              <div className="flex flex-col items-center gap-1.5">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/javari-logo.png"
+                  alt="Javari AI"
+                  className="h-10 w-auto object-contain"
+                  draggable={false}
+                />
+                <p className="font-mono text-[9px] tracking-[0.35em] text-zinc-600 uppercase">Javari AI</p>
               </div>
 
               {/* Avatar */}

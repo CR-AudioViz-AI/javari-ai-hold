@@ -92,45 +92,40 @@ function Avatar({ state }: { state: AvState }) {
     <div className="flex flex-col items-center gap-3 select-none" style={{ width: '100%' }}>
       {/* Portrait — aspect-ratio 3/4, scales with container width */}
       <div
-        className={`rounded-2xl ring-2 transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
+        className={`transition-all duration-500 ${ringStyle[state]} ${glowStyle[state]}`}
         style={{
-          position:    'relative',
-          width:       '100%',
-          maxWidth:    '360px',
-          aspectRatio: '3 / 4',
-          flexShrink:  1,
-          borderRadius: '1rem',
-          overflow:    'visible',
+          position:     'relative',
+          width:        '100%',
+          aspectRatio:  '3/4',
+          borderRadius: '16px',
+          overflow:     'hidden',
+          border:       '1px solid rgba(255,255,255,0.08)',
+          maxWidth:     '360px',
+          flexShrink:   1,
         }}
       >
-        {/* Portrait — clean transparent PNG, composites on dark UI background */}
+        {/* Dark radial backdrop — eliminates any residual halo against panel */}
+        <div
+          style={{
+            position:   'absolute',
+            inset:      0,
+            background: 'radial-gradient(circle at 50% 30%, #1a1a1f 0%, #0a0a0c 100%)',
+            zIndex:     0,
+          }}
+        />
+        {/* Avatar — re-matted transparent PNG */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
           style={{
-            position:       'absolute',
-            inset:          0,
-            width:          '100%',
-            height:         '100%',
-            objectFit:      'contain',
-            objectPosition: 'center',
-            zIndex:         1,
+            position:  'relative',
+            zIndex:    1,
+            width:     '100%',
+            height:    '100%',
+            objectFit: 'contain',
           }}
           draggable={false}
-        />
-        {/* State tint overlay */}
-        <div
-          className={`transition-all duration-300`}
-          style={{
-            position: 'absolute',
-            inset:    0,
-            zIndex:   2,
-            background:
-              state === 'thinking'  ? 'rgba(139,92,246,0.08)' :
-              state === 'executing' ? 'rgba(245,158,11,0.06)'  :
-                                      'transparent',
-          }}
         />
         {/* State dot — bottom-right */}
         <div
@@ -140,7 +135,7 @@ function Avatar({ state }: { state: AvState }) {
             state === 'responding' ? 'bg-emerald-400'         :
                                      'bg-amber-400 av-blink'
           }`}
-          style={{ zIndex: 3 }}
+          style={{ zIndex: 2 }}
         />
       </div>
 

@@ -1,9 +1,11 @@
 // app/api/javari/team/route.ts
 // Javari Team API — multi-model ensemble (planner -> builder -> validator)
 // First-turn: neutral greeting only. Subsequent turns: full ensemble.
-// Tuesday, March 17, 2026
+// Billing gate: free tier = 3 council requests/day.
+// Tuesday, March 17, 2026 | Updated: Thursday, March 19, 2026
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
+import { checkGate, trackUsage } from '@/lib/billing/gate'
 
 export const dynamic = 'force-dynamic'
 
@@ -26,18 +28,19 @@ const SYSTEM = [
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { message, history } = body as {
-      message: string
+    const { message, history, userId } = body as {
+      message:  string
       history?: Array<{ role: string; content: string }>
+      userId?:  string
     }
 
     if (!message?.trim()) {
       return NextResponse.json({ error: 'message required' }, { status: 400 })
     }
 
-    // First turn: skip expensive ensemble, return simple greeting
+    // First turn: skip gate + ensemble, return simple greeting
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
-    const isFirstTurn = priorUserMessages.length === 0
+    const isFirstTurn       = priorUserMessages.length === 0
 
     if (isFirstTurn) {
       const result = await route('chat', message, { systemPrompt: SYSTEM_FIRST })
@@ -49,6 +52,22 @@ export async function POST(req: NextRequest) {
         total_cost: result.cost,
       })
     }
+
+    // ── Billing gate ──────────────────────────────────────────────────────────
+    if (userId) {
+      const gate = await checkGate(userId, 'javari_team')
+      if (!gate.allowed) {
+        return NextResponse.json({
+          error:       gate.error,
+          message:     gate.message,
+          upgrade_url: gate.upgrade_url,
+          tier:        gate.tier,
+          used:        gate.used,
+          limit:       gate.limit,
+        }, { status: 402 })
+      }
+    }
+    // ── End billing gate ──────────────────────────────────────────────────────
 
     // Subsequent turns: full three-step ensemble
     const steps: { role: string; model: string; tier: string; content: string; cost: number }[] = []
@@ -70,6 +89,9 @@ export async function POST(req: NextRequest) {
       { systemPrompt: SYSTEM }
     )
     steps.push({ role: 'validator', model: validate.model, tier: validate.tier, content: validate.content, cost: validate.cost })
+
+    // Track usage after successful execution (fire-and-forget)
+    trackUsage(userId, 'javari_team').catch(() => {})
 
     return NextResponse.json({
       content:    validate.content,

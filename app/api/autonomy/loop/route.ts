@@ -4,7 +4,6 @@
 // verified=true → status=completed. verified=false → retry (up to 2), then blocked.
 // Source: roadmap_master only. No planner. No freeform.
 // Tuesday, March 17, 2026
-// Updated: Wednesday, March 18, 2026 — stuck-task recovery + phase auto-advance
 import { NextResponse }  from 'next/server'
 import { createClient }  from '@supabase/supabase-js'
 import { route }         from '@/lib/javari/model-router'
@@ -17,10 +16,6 @@ export const maxDuration = 60
 const DAILY_BUDGET       = 1.00
 const MAX_TASKS_PER_LOOP = 10
 const MAX_RETRIES        = 2      // attempts before → blocked
-
-// Tasks stuck in_progress for longer than this are considered orphaned
-const STUCK_THRESHOLD_MINUTES = 10
-const MAX_RESET_RETRIES        = 3  // never reset a task that has retried > this
 
 function db() {
   return createClient(
@@ -132,56 +127,33 @@ export async function GET() {
   }
 
   // ── STUCK TASK RECOVERY ───────────────────────────────────────────────────
-  // Any task stuck in 'in_progress' for > STUCK_THRESHOLD_MINUTES minutes is
-  // considered orphaned (the worker died, timed out, or Vercel killed the function).
-  // Reset it to 'pending' so the loop can pick it up again this cycle.
-  // Safety: never reset tasks that have already hit MAX_RESET_RETRIES.
-  const stuckCutoff = new Date(Date.now() - STUCK_THRESHOLD_MINUTES * 60 * 1000).toISOString()
+  // Reset orphaned in_progress tasks (worker died / function timed out).
+  // Safety: only tasks older than 10 minutes, retry_count < 3.
   const stuckResets: string[] = []
-
-  const { data: stuckTasks, error: stuckErr } = await supabase
-    .from('roadmap_master')
-    .select('id, title, phase, retry_count')
-    .eq('status', 'in_progress')
-    .lt('updated_at', stuckCutoff)
-    .lte('phase', activePhase + 1)   // only reset tasks in scope
-    .lt('retry_count', MAX_RESET_RETRIES)  // safety: don't reset infinite-retry loops
-
-  if (!stuckErr && stuckTasks?.length) {
-    for (const stuck of stuckTasks) {
-      const newRetries = (stuck.retry_count ?? 0) + 1
-      await supabase
-        .from('roadmap_master')
-        .update({
-          status:      'pending',
-          retry_count: newRetries,
-          updated_at:  new Date().toISOString(),
-          verification_notes: `Auto-reset from in_progress (stuck >${STUCK_THRESHOLD_MINUTES}m). Attempt ${newRetries}.`,
-        })
-        .eq('id', stuck.id)
-
-      stuckResets.push(stuck.id)
-
-      // Log the reset for audit trail
-      await supabase.from('javari_execution_log').insert({
-        roadmap_task_id: stuck.id,
-        cycle_id:        cycleId,
-        task_type:       'recovery',
-        status:          'reset',
-        error:           `Stuck in_progress for >${STUCK_THRESHOLD_MINUTES}m — reset to pending (attempt ${newRetries})`,
-        duration_ms:     0,
-        executed_at:     new Date().toISOString(),
-      }).catch(() => {/* non-fatal */})
+  try {
+    const stuckCutoff = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+    const { data: stuckTasks } = await supabase
+      .from('roadmap_master')
+      .select('id, retry_count')
+      .eq('status', 'in_progress')
+      .lt('updated_at', stuckCutoff)
+      .lte('phase', activePhase + 1)
+      .lt('retry_count', 3)
+    if (stuckTasks?.length) {
+      for (const stuck of stuckTasks) {
+        const nr = (stuck.retry_count ?? 0) + 1
+        await supabase.from('roadmap_master').update({
+          status: 'pending', retry_count: nr,
+          updated_at: new Date().toISOString(),
+          verification_notes: `Auto-reset: stuck in_progress >10m (attempt ${nr})`,
+        }).eq('id', stuck.id)
+        stuckResets.push(stuck.id)
+      }
     }
-  }
-  // ── END STUCK TASK RECOVERY ───────────────────────────────────────────────
+  } catch (_) { /* non-fatal — continue loop */ }
+  // ── END STUCK TASK RECOVERY ────────────────────────────────────────────────
 
   // ── Fetch pending tasks from roadmap_master ───────────────────────────────
-  // Query structure preserved exactly — only the phase ceiling may be adjusted
-  // by the auto-advance logic below.
-  let candidates: RoadmapTask[] | null = null
-  let phaseAdvanced = false
-
   const fetchCandidates = async (phaseLimit: number) => {
     const { data } = await supabase
       .from('roadmap_master')
@@ -191,48 +163,30 @@ export async function GET() {
       .order('phase', { ascending: true })
       .order('id', { ascending: true })
       .limit(MAX_TASKS_PER_LOOP * 2)
-    return data
+    return data as RoadmapTask[] | null
   }
 
-  candidates = await fetchCandidates(activePhase)
+  let candidates = await fetchCandidates(activePhase)
+  let phaseAdvanced = false
 
   // ── PHASE AUTO-ADVANCE ────────────────────────────────────────────────────
-  // If no pending tasks exist at the current phase ceiling, the current phase
-  // is fully saturated (all tasks are completed, in_progress, or blocked).
-  // Increment activePhase by 1 in-memory for this cycle and retry the query ONCE.
-  // This allows the loop to reach Phase 4 when Phases 0–2 are done.
-  //
-  // Safety: find the highest phase in the roadmap to cap the advance.
+  // If no pending tasks at current phase, advance in-memory and retry once.
   if (!candidates?.length) {
-    const { data: maxPhaseRows } = await supabase
-      .from('roadmap_master')
-      .select('phase')
-      .order('phase', { ascending: false })
-      .limit(1)
-
-    const maxPhase = (maxPhaseRows?.[0]?.phase) ?? activePhase
-
-    if (activePhase < maxPhase) {
-      // Advance phase by 1 in-memory only — does NOT write to javari_system_config
-      activePhase  += 1
-      phaseAdvanced = true
-
-      // Log phase jump for audit trail
-      await supabase.from('javari_execution_log').insert({
-        roadmap_task_id: `phase-advance-${cycleId}`,
-        cycle_id:        cycleId,
-        task_type:       'phase_advance',
-        status:          'info',
-        error:           `Auto-advanced to phase ${activePhase} (no pending tasks at phase ${activePhase - 1})`,
-        duration_ms:     0,
-        executed_at:     new Date().toISOString(),
-      }).catch(() => {/* non-fatal */})
-
-      // Retry query ONCE with the advanced phase ceiling
-      candidates = await fetchCandidates(activePhase)
-    }
+    try {
+      const { data: maxRows } = await supabase
+        .from('roadmap_master')
+        .select('phase')
+        .order('phase', { ascending: false })
+        .limit(1)
+      const maxPhase = (maxRows?.[0]?.phase) ?? activePhase
+      if (activePhase < maxPhase) {
+        activePhase  += 1
+        phaseAdvanced = true
+        candidates    = await fetchCandidates(activePhase)
+      }
+    } catch (_) { /* non-fatal */ }
   }
-  // ── END PHASE AUTO-ADVANCE ────────────────────────────────────────────────
+  // ── END PHASE AUTO-ADVANCE ─────────────────────────────────────────────────
 
   if (!candidates?.length) {
     const finalSpend = await getDailySpend()
@@ -240,8 +194,7 @@ export async function GET() {
       status: 'idle', reason: 'No pending tasks in roadmap_master',
       mode, active_phase: activePhase, tasks_run: 0, executed: [],
       roadmap_source: 'roadmap_master',
-      stuck_tasks_reset: stuckResets,
-      phase_advanced: phaseAdvanced,
+      stuck_tasks_reset: stuckResets, phase_advanced: phaseAdvanced,
       daily_spend: `$${finalSpend.toFixed(4)}`,
       budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
       cycle_ms: Date.now() - cycleStart, timestamp: new Date().toISOString(),
@@ -262,8 +215,7 @@ export async function GET() {
       status: 'blocked', reason: `All ${candidates.length} candidates blocked by unmet dependencies`,
       mode, active_phase: activePhase, tasks_run: 0,
       roadmap_source: 'roadmap_master',
-      stuck_tasks_reset: stuckResets,
-      phase_advanced: phaseAdvanced,
+      stuck_tasks_reset: stuckResets, phase_advanced: phaseAdvanced,
       daily_spend: `$${finalSpend.toFixed(4)}`,
       budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
       cycle_ms: Date.now() - cycleStart, timestamp: new Date().toISOString(),

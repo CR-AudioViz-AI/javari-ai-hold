@@ -106,7 +106,7 @@ function Avatar({ state }: { state: AvState }) {
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
-          src="/javari-portrait-v2.png"
+          src="/javari-portrait-v3.png"
           alt="Javari AI"
           style={{
             width:          '100%',

@@ -139,7 +139,7 @@ export async function GET() {
   const stuckCutoff = new Date(Date.now() - STUCK_THRESHOLD_MINUTES * 60 * 1000).toISOString()
   const stuckResets: string[] = []
 
-  const { data: stuckTasks } = await supabase
+  const { data: stuckTasks, error: stuckErr } = await supabase
     .from('roadmap_master')
     .select('id, title, phase, retry_count')
     .eq('status', 'in_progress')
@@ -147,7 +147,7 @@ export async function GET() {
     .lte('phase', activePhase + 1)   // only reset tasks in scope
     .lt('retry_count', MAX_RESET_RETRIES)  // safety: don't reset infinite-retry loops
 
-  if (stuckTasks?.length) {
+  if (!stuckErr && stuckTasks?.length) {
     for (const stuck of stuckTasks) {
       const newRetries = (stuck.retry_count ?? 0) + 1
       await supabase
@@ -204,14 +204,13 @@ export async function GET() {
   //
   // Safety: find the highest phase in the roadmap to cap the advance.
   if (!candidates?.length) {
-    const { data: maxPhaseRow } = await supabase
+    const { data: maxPhaseRows } = await supabase
       .from('roadmap_master')
       .select('phase')
       .order('phase', { ascending: false })
       .limit(1)
-      .single()
 
-    const maxPhase = maxPhaseRow?.phase ?? activePhase
+    const maxPhase = (maxPhaseRows?.[0]?.phase) ?? activePhase
 
     if (activePhase < maxPhase) {
       // Advance phase by 1 in-memory only — does NOT write to javari_system_config

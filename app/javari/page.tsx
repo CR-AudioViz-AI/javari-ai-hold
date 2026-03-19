@@ -99,8 +99,7 @@ function Avatar({ state }: { state: AvState }) {
           aspectRatio:  '3/4',
           borderRadius: '16px',
           overflow:     'hidden',
-          border:       '1px solid rgba(255,255,255,0.08)',
-          background:   'radial-gradient(circle at 50% 30%, #1a1a1f 0%, #0a0a0c 100%)',
+          background:   '#ffffff',
           maxWidth:     '360px',
           flexShrink:   1,
         }}
@@ -110,9 +109,10 @@ function Avatar({ state }: { state: AvState }) {
           src="/javari-portrait.png"
           alt="Javari AI"
           style={{
-            width:     '100%',
-            height:    '100%',
-            objectFit: 'contain',
+            width:          '100%',
+            height:         '100%',
+            objectFit:      'contain',
+            objectPosition: 'center top',
           }}
           draggable={false}
         />

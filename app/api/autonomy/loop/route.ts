@@ -4,6 +4,7 @@
 // verified=true → status=completed. verified=false → retry (up to 2), then blocked.
 // Source: roadmap_master only. No planner. No freeform.
 // Tuesday, March 17, 2026
+// Updated: Thursday, March 19, 2026 — Night Execution Mode (safeguards + priority filter)
 import { NextResponse }  from 'next/server'
 import { createClient }  from '@supabase/supabase-js'
 import { route }         from '@/lib/javari/model-router'
@@ -16,6 +17,27 @@ export const maxDuration = 60
 const DAILY_BUDGET       = 1.00
 const MAX_TASKS_PER_LOOP = 10
 const MAX_RETRIES        = 2      // attempts before → blocked
+
+// ── Night Mode constants ──────────────────────────────────────────────────────
+const NIGHT_MODE_ENABLED = true
+
+// Revenue/stability modules executed first
+const PRIORITY_MODULES = new Set([
+  'javari_forge', 'billing', 'payments', 'analytics',
+  'javari_mobile', 'mobile', 'auth_system', 'credits_os',
+])
+
+// Consecutive failure guard: if this many cycles in a row have failures → pause
+const CONSECUTIVE_FAIL_LIMIT = 3
+
+// Cost guards
+const SAFE_MODE_THRESHOLD  = 0.50   // above this → MAX_TASKS = 3
+const AUTO_PAUSE_THRESHOLD = 0.90   // above this → pause
+
+// Stuck task health thresholds
+const STUCK_WARN_THRESHOLD  = 5
+const STUCK_PAUSE_THRESHOLD = 10
+// ── End Night Mode constants ──────────────────────────────────────────────────
 
 function db() {
   return createClient(
@@ -52,6 +74,37 @@ async function areDependenciesMet(supabase: ReturnType<typeof db>, deps: string[
   if (!data) return true
   // A dependency is met when it is completed AND verified
   return data.every(d => d.status === 'completed' && d.verified === true)
+}
+
+// ── Safety log helper ─────────────────────────────────────────────────────────
+// All guard triggers write to javari_execution_log with task_type = 'safety'
+async function safetyLog(
+  supabase: ReturnType<typeof db>,
+  cycleId: string,
+  reason: string
+): Promise<void> {
+  await supabase.from('javari_execution_log').insert({
+    roadmap_task_id: `safety-${cycleId}`,
+    cycle_id:        cycleId,
+    task_type:       'safety',
+    status:          'guard_triggered',
+    error:           reason,
+    duration_ms:     0,
+    executed_at:     new Date().toISOString(),
+  }).catch(() => {/* non-fatal */})
+}
+
+// ── Trigger kill switch via autonomy_control ──────────────────────────────────
+async function triggerKillSwitch(
+  supabase: ReturnType<typeof db>,
+  cycleId: string,
+  reason: string
+): Promise<void> {
+  await supabase.from('autonomy_control').upsert({
+    id: 1, is_paused: true, paused_by: 'night_mode_guard',
+    reason, updated_at: new Date().toISOString(),
+  }).catch(() => {/* non-fatal */})
+  await safetyLog(supabase, cycleId, `AUTO-PAUSE: ${reason}`)
 }
 
 // ── Inline verification ───────────────────────────────────────────────────────
@@ -100,7 +153,7 @@ export async function GET() {
   const config      = await getConfig(supabase)
   const mode        = config['SYSTEM_MODE'] ?? 'BUILD'
   let   activePhase = parseInt(config['ACTIVE_PHASE'] ?? '2', 10)
-  const maxPerRun   = Math.min(
+  let   maxPerRun   = Math.min(
     parseInt(config['MAX_CONCURRENT_BUILDS'] ?? String(MAX_TASKS_PER_LOOP), 10),
     MAX_TASKS_PER_LOOP
   )
@@ -126,6 +179,76 @@ export async function GET() {
     })
   }
 
+  // ── NIGHT MODE: COST GUARD ────────────────────────────────────────────────
+  // Runs after the standard budget gate so it only applies between $0.50–$0.90.
+  // Standard gate already handles >= $1.00.
+  if (NIGHT_MODE_ENABLED) {
+    if (spent >= AUTO_PAUSE_THRESHOLD) {
+      await triggerKillSwitch(supabase, cycleId,
+        `Cost guard: daily_spend $${spent.toFixed(4)} >= auto-pause threshold $${AUTO_PAUSE_THRESHOLD}`)
+      return NextResponse.json({
+        status:      'paused',
+        reason:      `Night mode: cost auto-pause at $${spent.toFixed(4)}`,
+        daily_spend: `$${spent.toFixed(4)}`,
+        night_mode:  true,
+        timestamp:   new Date().toISOString(),
+      })
+    }
+    if (spent >= SAFE_MODE_THRESHOLD) {
+      // Safe mode: reduce task count to 3, log the throttle
+      maxPerRun = Math.min(maxPerRun, 3)
+      await safetyLog(supabase, cycleId,
+        `Cost guard: safe mode active ($${spent.toFixed(4)} >= $${SAFE_MODE_THRESHOLD}) — MAX_TASKS=3`)
+    }
+  }
+  // ── END COST GUARD ────────────────────────────────────────────────────────
+
+  // ── NIGHT MODE: CONSECUTIVE FAILURE GUARD ────────────────────────────────
+  // Read the last N cycles from execution_log to check for repeated failures.
+  // Only fires if NIGHT_MODE_ENABLED = true.
+  if (NIGHT_MODE_ENABLED) {
+    try {
+      const { data: recentCycles } = await supabase
+        .from('javari_execution_log')
+        .select('cycle_id, status')
+        .not('cycle_id', 'like', 'safety-%')
+        .not('cycle_id', 'like', 'kill-switch%')
+        .not('cycle_id', 'like', 'pause-%')
+        .not('cycle_id', 'like', 'resume-%')
+        .not('cycle_id', 'like', 'phase-advance-%')
+        .order('executed_at', { ascending: false })
+        .limit(CONSECUTIVE_FAIL_LIMIT * MAX_TASKS_PER_LOOP * 2)
+
+      if (recentCycles?.length) {
+        // Group by cycle_id in order
+        const cycleOrder: string[] = []
+        const cycleFailMap: Record<string, boolean> = {}
+        for (const row of recentCycles) {
+          if (!cycleOrder.includes(row.cycle_id)) cycleOrder.push(row.cycle_id)
+          if (row.status === 'failed' || row.status === 'verification_failed') {
+            cycleFailMap[row.cycle_id] = true
+          }
+        }
+        // Check if the most recent N cycles all had failures
+        const recentN = cycleOrder.slice(0, CONSECUTIVE_FAIL_LIMIT)
+        const allFailed = recentN.length === CONSECUTIVE_FAIL_LIMIT &&
+          recentN.every(cid => cycleFailMap[cid] === true)
+
+        if (allFailed) {
+          await triggerKillSwitch(supabase, cycleId,
+            `Failure guard: ${CONSECUTIVE_FAIL_LIMIT} consecutive cycles with failures. Last cycles: ${recentN.join(', ')}`)
+          return NextResponse.json({
+            status:     'paused',
+            reason:     `Night mode: ${CONSECUTIVE_FAIL_LIMIT} consecutive failure cycles — auto-paused`,
+            night_mode: true,
+            timestamp:  new Date().toISOString(),
+          })
+        }
+      }
+    } catch (_) { /* non-fatal — do not block loop */ }
+  }
+  // ── END CONSECUTIVE FAILURE GUARD ────────────────────────────────────────
+
   // ── STUCK TASK RECOVERY ───────────────────────────────────────────────────
   // Reset orphaned in_progress tasks (worker died / function timed out).
   // Safety: only tasks older than 10 minutes, retry_count < 3.
@@ -149,12 +272,69 @@ export async function GET() {
         }).eq('id', stuck.id)
         stuckResets.push(stuck.id)
       }
+
+      // ── NIGHT MODE: HEALTH CHECK on stuck count ──────────────────────────
+      if (NIGHT_MODE_ENABLED) {
+        if (stuckTasks.length > STUCK_PAUSE_THRESHOLD) {
+          await triggerKillSwitch(supabase, cycleId,
+            `Health guard: ${stuckTasks.length} stuck tasks > pause threshold (${STUCK_PAUSE_THRESHOLD})`)
+          return NextResponse.json({
+            status:     'paused',
+            reason:     `Night mode: ${stuckTasks.length} stuck tasks — auto-paused`,
+            night_mode: true,
+            timestamp:  new Date().toISOString(),
+          })
+        }
+        if (stuckTasks.length > STUCK_WARN_THRESHOLD) {
+          await safetyLog(supabase, cycleId,
+            `Health warning: ${stuckTasks.length} stuck tasks > warn threshold (${STUCK_WARN_THRESHOLD})`)
+        }
+      }
+      // ── END HEALTH CHECK ──────────────────────────────────────────────────
     }
   } catch (_) { /* non-fatal — continue loop */ }
   // ── END STUCK TASK RECOVERY ────────────────────────────────────────────────
 
   // ── Fetch pending tasks from roadmap_master ───────────────────────────────
-  const fetchCandidates = async (phaseLimit: number) => {
+  // NIGHT MODE: Priority modules (revenue/stability) are fetched first by
+  // applying a two-pass strategy: pass 1 = priority modules only, pass 2 = all.
+  // This avoids adding a CASE expression that some Supabase versions don't support
+  // in the JS client .order() call.
+  const fetchCandidates = async (phaseLimit: number): Promise<RoadmapTask[] | null> => {
+    if (NIGHT_MODE_ENABLED) {
+      // Pass 1: priority modules
+      const { data: priorityRows } = await supabase
+        .from('roadmap_master')
+        .select('id, phase, module, module_family, title, description, task_type, priority, dependencies, artifacts, retry_count')
+        .eq('status', 'pending')
+        .lte('phase', phaseLimit + 1)
+        .in('module', [...PRIORITY_MODULES])
+        .order('phase', { ascending: true })
+        .order('id',    { ascending: true })
+        .limit(MAX_TASKS_PER_LOOP * 2)
+
+      const priorityIds = new Set((priorityRows ?? []).map(r => r.id))
+
+      // Pass 2: all remaining (fills remainder of the batch)
+      const remaining = MAX_TASKS_PER_LOOP * 2 - (priorityRows?.length ?? 0)
+      let otherRows: RoadmapTask[] = []
+      if (remaining > 0) {
+        const { data: allRows } = await supabase
+          .from('roadmap_master')
+          .select('id, phase, module, module_family, title, description, task_type, priority, dependencies, artifacts, retry_count')
+          .eq('status', 'pending')
+          .lte('phase', phaseLimit + 1)
+          .order('phase', { ascending: true })
+          .order('id',    { ascending: true })
+          .limit(MAX_TASKS_PER_LOOP * 2)
+        otherRows = (allRows ?? []).filter(r => !priorityIds.has(r.id))
+      }
+
+      const merged = [...(priorityRows ?? []), ...otherRows]
+      return merged.length ? (merged as RoadmapTask[]) : null
+    }
+
+    // Standard path (night mode off)
     const { data } = await supabase
       .from('roadmap_master')
       .select('id, phase, module, module_family, title, description, task_type, priority, dependencies, artifacts, retry_count')
@@ -195,6 +375,7 @@ export async function GET() {
       mode, active_phase: activePhase, tasks_run: 0, executed: [],
       roadmap_source: 'roadmap_master',
       stuck_tasks_reset: stuckResets, phase_advanced: phaseAdvanced,
+      night_mode: NIGHT_MODE_ENABLED,
       daily_spend: `$${finalSpend.toFixed(4)}`,
       budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
       cycle_ms: Date.now() - cycleStart, timestamp: new Date().toISOString(),
@@ -216,6 +397,7 @@ export async function GET() {
       mode, active_phase: activePhase, tasks_run: 0,
       roadmap_source: 'roadmap_master',
       stuck_tasks_reset: stuckResets, phase_advanced: phaseAdvanced,
+      night_mode: NIGHT_MODE_ENABLED,
       daily_spend: `$${finalSpend.toFixed(4)}`,
       budget_left: `$${Math.max(0, DAILY_BUDGET - finalSpend).toFixed(4)}`,
       cycle_ms: Date.now() - cycleStart, timestamp: new Date().toISOString(),
@@ -292,7 +474,7 @@ export async function GET() {
       )
 
       if (verified) {
-        // ✅ VERIFIED → completed
+        // VERIFIED → completed
         await supabase.from('roadmap_master').update({
           status:          'completed',
           verified:        true,
@@ -321,7 +503,7 @@ export async function GET() {
         }
 
       } else {
-        // ❌ Verification failed — retry or block
+        // Verification failed — retry or block
         const newRetries = retries + 1
         const newStatus  = newRetries >= MAX_RETRIES ? 'blocked' : 'pending'
 
@@ -416,6 +598,7 @@ export async function GET() {
     verification_gated: true,
     phase_advanced:     phaseAdvanced,
     stuck_tasks_reset:  stuckResets,
+    night_mode:         NIGHT_MODE_ENABLED,
     tasks_run:          executed.length,
     completed_verified: completedVerified,
     verify_failed:      verifyFailed,

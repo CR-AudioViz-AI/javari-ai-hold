@@ -2,10 +2,12 @@
 // Javari Chat API — customer-facing AI assistant
 // First-turn: neutral open greeting, no assumed context.
 // Subsequent turns: adapt to user intent.
-// Tuesday, March 17, 2026
+// Billing gate: free tier = 10 requests/day.
+// Tuesday, March 17, 2026 | Updated: Thursday, March 19, 2026
 import { NextRequest, NextResponse } from 'next/server'
 import { route }          from '@/lib/javari/model-router'
 import { detectTaskType } from '@/lib/javari/router'
+import { checkGate, trackUsage } from '@/lib/billing/gate'
 
 export const dynamic = 'force-dynamic'
 
@@ -31,9 +33,10 @@ const SYSTEM_CONTEXTUAL = [
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { message, history } = body as {
-      message: string
+    const { message, history, userId } = body as {
+      message:  string
       history?: Array<{ role: string; content: string }>
+      userId?:  string
     }
 
     if (!message?.trim()) {
@@ -42,7 +45,23 @@ export async function POST(req: NextRequest) {
 
     // First turn detection: no prior user messages in history
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
-    const isFirstTurn = priorUserMessages.length === 0
+    const isFirstTurn       = priorUserMessages.length === 0
+
+    // ── Billing gate (skip on first turn — greetings are always free) ─────────
+    if (!isFirstTurn && userId) {
+      const gate = await checkGate(userId, 'javari_chat')
+      if (!gate.allowed) {
+        return NextResponse.json({
+          error:       gate.error,
+          message:     gate.message,
+          upgrade_url: gate.upgrade_url,
+          tier:        gate.tier,
+          used:        gate.used,
+          limit:       gate.limit,
+        }, { status: 402 })
+      }
+    }
+    // ── End billing gate ──────────────────────────────────────────────────────
 
     const systemPrompt = isFirstTurn ? SYSTEM_FIRST : SYSTEM_CONTEXTUAL
     const taskType     = isFirstTurn ? 'chat' : (detectTaskType(message) as any)
@@ -51,6 +70,11 @@ export async function POST(req: NextRequest) {
 
     if (result.blocked) {
       return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
+    }
+
+    // Track usage after successful execution (fire-and-forget)
+    if (!isFirstTurn) {
+      trackUsage(userId, 'javari_chat').catch(() => {})
     }
 
     return NextResponse.json({

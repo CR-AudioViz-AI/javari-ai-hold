@@ -100,27 +100,16 @@ function Avatar({ state }: { state: AvState }) {
           borderRadius: '16px',
           overflow:     'hidden',
           border:       '1px solid rgba(255,255,255,0.08)',
+          background:   'radial-gradient(circle at 50% 30%, #1a1a1f 0%, #0a0a0c 100%)',
           maxWidth:     '360px',
           flexShrink:   1,
         }}
       >
-        {/* Dark radial backdrop — eliminates any residual halo against panel */}
-        <div
-          style={{
-            position:   'absolute',
-            inset:      0,
-            background: 'radial-gradient(circle at 50% 30%, #1a1a1f 0%, #0a0a0c 100%)',
-            zIndex:     0,
-          }}
-        />
-        {/* Avatar — re-matted transparent PNG */}
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img
           src="/javari-portrait.png"
           alt="Javari AI"
           style={{
-            position:  'relative',
-            zIndex:    1,
             width:     '100%',
             height:    '100%',
             objectFit: 'contain',
@@ -135,7 +124,6 @@ function Avatar({ state }: { state: AvState }) {
             state === 'responding' ? 'bg-emerald-400'         :
                                      'bg-amber-400 av-blink'
           }`}
-          style={{ zIndex: 2 }}
         />
       </div>
 

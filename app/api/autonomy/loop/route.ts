@@ -179,7 +179,7 @@ export async function GET() {
   // ── Fetch pending tasks from roadmap_master ───────────────────────────────
   // Query structure preserved exactly — only the phase ceiling may be adjusted
   // by the auto-advance logic below.
-  let candidates = null
+  let candidates: RoadmapTask[] | null = null
   let phaseAdvanced = false
 
   const fetchCandidates = async (phaseLimit: number) => {

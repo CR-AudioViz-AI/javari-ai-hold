@@ -3,10 +3,12 @@
 // POST { prompt, language?, context?, userId? }
 // Returns { code, explanation, model, cost }
 // Billing gate: free tier = 5 requests/day.
+// Credit check: deduct 1 credit per successful generation.
 // Thursday, March 19, 2026
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
+import { getCreditBalance, deductCredit } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
 
@@ -33,8 +35,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'prompt required' }, { status: 400 })
     }
 
-    // ── Billing gate ──────────────────────────────────────────────────────────
     if (userId) {
+      // ── Daily rate gate ─────────────────────────────────────────────────
       const gate = await checkGate(userId, 'javari_forge')
       if (!gate.allowed) {
         return NextResponse.json({
@@ -46,8 +48,17 @@ export async function POST(req: NextRequest) {
           limit:       gate.limit,
         }, { status: 402 })
       }
+
+      // ── Credit balance check ────────────────────────────────────────────
+      const balance = await getCreditBalance(userId)
+      if (balance <= 0) {
+        return NextResponse.json({
+          error:       'no_credits',
+          message:     'You are out of credits. Please upgrade.',
+          upgrade_url: '/pricing',
+        }, { status: 402 })
+      }
     }
-    // ── End billing gate ──────────────────────────────────────────────────────
 
     const fullPrompt = [
       `Language: ${language}`,
@@ -57,20 +68,20 @@ export async function POST(req: NextRequest) {
 
     const result = await route('coding', fullPrompt, {
       systemPrompt: SYSTEM_FORGE,
-      maxTier:      'moderate',  // Forge deserves a stronger model
+      maxTier:      'moderate',
     })
 
     if (result.blocked) {
       return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
     }
 
-    // Split code from explanation at --- separator
     const parts       = result.content.split(/^---$/m)
     const code        = parts[0]?.trim() ?? result.content
     const explanation = parts[1]?.trim() ?? ''
 
-    // Track usage (fire-and-forget)
+    // ── Post-success tracking (fire-and-forget, only on success) ───────────
     trackUsage(userId, 'javari_forge').catch(() => {})
+    deductCredit(userId, 'javari_forge').catch(() => {})
 
     return NextResponse.json({
       code,

@@ -2,14 +2,15 @@
 // Javari Team API — multi-model ensemble (planner -> builder -> validator)
 // First-turn: neutral greeting only. Subsequent turns: full ensemble.
 // Billing gate: free tier = 3 council requests/day.
+// Credit check: deduct 1 credit per successful ensemble execution.
 // Tuesday, March 17, 2026 | Updated: Thursday, March 19, 2026
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
+import { getCreditBalance, deductCredit } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
 
-// Opening message — neutral, no assumptions
 const SYSTEM_FIRST = [
   'You are Javari AI, a helpful AI assistant.',
   'This is the opening message of a new session.',
@@ -19,7 +20,6 @@ const SYSTEM_FIRST = [
   'One or two short sentences maximum.',
 ].join('\n')
 
-// Council members — adapt to what user needs
 const SYSTEM = [
   'You are part of Javari AI — "Your Story. Our Design."',
   'Be precise, direct, and adapt to what the user actually needs.',
@@ -38,10 +38,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'message required' }, { status: 400 })
     }
 
-    // First turn: skip gate + ensemble, return simple greeting
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn       = priorUserMessages.length === 0
 
+    // First turn: free greeting, skip all gates
     if (isFirstTurn) {
       const result = await route('chat', message, { systemPrompt: SYSTEM_FIRST })
       return NextResponse.json({
@@ -53,8 +53,8 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // ── Billing gate ──────────────────────────────────────────────────────────
     if (userId) {
+      // ── Daily rate gate ─────────────────────────────────────────────────
       const gate = await checkGate(userId, 'javari_team')
       if (!gate.allowed) {
         return NextResponse.json({
@@ -66,10 +66,18 @@ export async function POST(req: NextRequest) {
           limit:       gate.limit,
         }, { status: 402 })
       }
-    }
-    // ── End billing gate ──────────────────────────────────────────────────────
 
-    // Subsequent turns: full three-step ensemble
+      // ── Credit balance check ────────────────────────────────────────────
+      const balance = await getCreditBalance(userId)
+      if (balance <= 0) {
+        return NextResponse.json({
+          error:       'no_credits',
+          message:     'You are out of credits. Please upgrade.',
+          upgrade_url: '/pricing',
+        }, { status: 402 })
+      }
+    }
+
     const steps: { role: string; model: string; tier: string; content: string; cost: number }[] = []
 
     const plan = await route('planning',
@@ -90,8 +98,9 @@ export async function POST(req: NextRequest) {
     )
     steps.push({ role: 'validator', model: validate.model, tier: validate.tier, content: validate.content, cost: validate.cost })
 
-    // Track usage after successful execution (fire-and-forget)
+    // ── Post-success tracking (fire-and-forget, only on success) ───────────
     trackUsage(userId, 'javari_team').catch(() => {})
+    deductCredit(userId, 'javari_team').catch(() => {})
 
     return NextResponse.json({
       content:    validate.content,

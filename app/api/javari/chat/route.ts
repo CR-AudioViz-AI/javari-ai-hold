@@ -3,15 +3,16 @@
 // First-turn: neutral open greeting, no assumed context.
 // Subsequent turns: adapt to user intent.
 // Billing gate: free tier = 10 requests/day.
+// Credit check: deduct 1 credit per successful non-first-turn request.
 // Tuesday, March 17, 2026 | Updated: Thursday, March 19, 2026
 import { NextRequest, NextResponse } from 'next/server'
 import { route }          from '@/lib/javari/model-router'
 import { detectTaskType } from '@/lib/javari/router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
+import { getCreditBalance, deductCredit } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
 
-// First interaction — neutral, no context assumed, no product mentions
 const SYSTEM_FIRST = [
   'You are Javari AI, a helpful AI assistant.',
   'This is the opening message of a new session.',
@@ -22,7 +23,6 @@ const SYSTEM_FIRST = [
   'One or two short sentences maximum.',
 ].join('\n')
 
-// Subsequent turns — adapt to what the user has actually asked about
 const SYSTEM_CONTEXTUAL = [
   'You are Javari AI — helpful, direct, and capable.',
   'Your mission: "Your Story. Our Design."',
@@ -43,12 +43,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'message required' }, { status: 400 })
     }
 
-    // First turn detection: no prior user messages in history
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn       = priorUserMessages.length === 0
 
-    // ── Billing gate (skip on first turn — greetings are always free) ─────────
+    // First turn is always free — greetings never gate or consume credits
     if (!isFirstTurn && userId) {
+
+      // ── Daily rate gate ───────────────────────────────────────────────────
       const gate = await checkGate(userId, 'javari_chat')
       if (!gate.allowed) {
         return NextResponse.json({
@@ -60,8 +61,17 @@ export async function POST(req: NextRequest) {
           limit:       gate.limit,
         }, { status: 402 })
       }
+
+      // ── Credit balance check ──────────────────────────────────────────────
+      const balance = await getCreditBalance(userId)
+      if (balance <= 0) {
+        return NextResponse.json({
+          error:       'no_credits',
+          message:     'You are out of credits. Please upgrade.',
+          upgrade_url: '/pricing',
+        }, { status: 402 })
+      }
     }
-    // ── End billing gate ──────────────────────────────────────────────────────
 
     const systemPrompt = isFirstTurn ? SYSTEM_FIRST : SYSTEM_CONTEXTUAL
     const taskType     = isFirstTurn ? 'chat' : (detectTaskType(message) as any)
@@ -72,9 +82,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
     }
 
-    // Track usage after successful execution (fire-and-forget)
+    // ── Post-success tracking (fire-and-forget, only on success) ──────────
     if (!isFirstTurn) {
       trackUsage(userId, 'javari_chat').catch(() => {})
+      deductCredit(userId, 'javari_chat').catch(() => {})
     }
 
     return NextResponse.json({

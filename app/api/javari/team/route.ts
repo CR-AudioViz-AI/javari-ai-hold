@@ -2,12 +2,13 @@
 // Javari Team API — multi-model ensemble (planner -> builder -> validator)
 // First-turn: neutral greeting only. Subsequent turns: full ensemble.
 // Billing gate: free tier = 3 council requests/day.
-// Credit check: deduct 1 credit per successful ensemble execution.
-// Tuesday, March 17, 2026 | Updated: Thursday, March 19, 2026
+// Credit cost: 5 credits per ensemble (3 AI calls — CREDIT_COSTS.javari_team).
+// Pre-check total cost BEFORE first model call. Deduct once after full success.
+// Updated: March 21, 2026 — Credit enforcement audit.
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
-import { getCreditBalance, deductCredit } from '@/lib/billing/credits'
+import { getCreditBalance, deductCredits, CREDIT_COSTS } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
 
@@ -24,6 +25,9 @@ const SYSTEM = [
   'You are part of Javari AI — "Your Story. Our Design."',
   'Be precise, direct, and adapt to what the user actually needs.',
 ].join('\n')
+
+// Total cost covers all 3 steps — checked upfront, deducted once on success
+const ROUTE_COST = CREDIT_COSTS.javari_team  // 5 credits
 
 export async function POST(req: NextRequest) {
   try {
@@ -45,11 +49,12 @@ export async function POST(req: NextRequest) {
     if (isFirstTurn) {
       const result = await route('chat', message, { systemPrompt: SYSTEM_FIRST })
       return NextResponse.json({
-        content:    result.content,
-        model:      result.model,
-        tier:       result.tier,
-        ensemble:   [],
-        total_cost: result.cost,
+        content:      result.content,
+        model:        result.model,
+        tier:         result.tier,
+        ensemble:     [],
+        total_cost:   result.cost,
+        credits_used: 0,
       })
     }
 
@@ -67,12 +72,14 @@ export async function POST(req: NextRequest) {
         }, { status: 402 })
       }
 
-      // ── Credit balance check ────────────────────────────────────────────
+      // ── Credit check — full ensemble cost BEFORE first model call ────────
       const balance = await getCreditBalance(userId)
-      if (balance <= 0) {
+      if (balance < ROUTE_COST) {
         return NextResponse.json({
           error:       'no_credits',
-          message:     'You are out of credits. Please upgrade.',
+          message:     `Team ensemble costs ${ROUTE_COST} credits (3 AI calls). You have ${balance}. Please upgrade.`,
+          required:    ROUTE_COST,
+          available:   balance,
           upgrade_url: '/pricing',
         }, { status: 402 })
       }
@@ -98,16 +105,19 @@ export async function POST(req: NextRequest) {
     )
     steps.push({ role: 'validator', model: validate.model, tier: validate.tier, content: validate.content, cost: validate.cost })
 
-    // ── Post-success tracking (fire-and-forget, only on success) ───────────
-    trackUsage(userId, 'javari_team').catch(() => {})
-    deductCredit(userId, 'javari_team').catch(() => {})
+    // ── Single deduction after all 3 steps succeed ─────────────────────────
+    if (userId) {
+      trackUsage(userId, 'javari_team').catch(() => {})
+      deductCredits(userId, ROUTE_COST, 'javari_team').catch(() => {})
+    }
 
     return NextResponse.json({
-      content:    validate.content,
-      model:      validate.model,
-      tier:       validate.tier,
-      total_cost: steps.reduce((s, step) => s + step.cost, 0),
-      ensemble:   steps,
+      content:      validate.content,
+      model:        validate.model,
+      tier:         validate.tier,
+      total_cost:   steps.reduce((s, step) => s + step.cost, 0),
+      ensemble:     steps,
+      credits_used: ROUTE_COST,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'

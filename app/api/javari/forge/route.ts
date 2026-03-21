@@ -3,12 +3,12 @@
 // POST { prompt, language?, context?, userId? }
 // Returns { code, explanation, model, cost }
 // Billing gate: free tier = 5 requests/day.
-// Credit check: deduct 1 credit per successful generation.
-// Thursday, March 19, 2026
+// Credit cost: 3 credits per generation (CREDIT_COSTS.javari_forge).
+// Updated: March 21, 2026 — Credit enforcement audit.
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
-import { getCreditBalance, deductCredit } from '@/lib/billing/credits'
+import { getCreditBalance, deductCredits, CREDIT_COSTS } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
 
@@ -20,6 +20,8 @@ const SYSTEM_FORGE = [
   'Return code first, then a brief explanation below a --- separator.',
   'Never truncate. Never use // TODO or // add logic here.',
 ].join('\n')
+
+const ROUTE_COST = CREDIT_COSTS.javari_forge  // 3 credits
 
 export async function POST(req: NextRequest) {
   try {
@@ -49,12 +51,14 @@ export async function POST(req: NextRequest) {
         }, { status: 402 })
       }
 
-      // ── Credit balance check ────────────────────────────────────────────
+      // ── Credit balance check (pre-execution, exact cost) ────────────────
       const balance = await getCreditBalance(userId)
-      if (balance <= 0) {
+      if (balance < ROUTE_COST) {
         return NextResponse.json({
           error:       'no_credits',
-          message:     'You are out of credits. Please upgrade.',
+          message:     `Code generation costs ${ROUTE_COST} credits. You have ${balance}. Please upgrade.`,
+          required:    ROUTE_COST,
+          available:   balance,
           upgrade_url: '/pricing',
         }, { status: 402 })
       }
@@ -79,18 +83,21 @@ export async function POST(req: NextRequest) {
     const code        = parts[0]?.trim() ?? result.content
     const explanation = parts[1]?.trim() ?? ''
 
-    // ── Post-success tracking (fire-and-forget, only on success) ───────────
-    trackUsage(userId, 'javari_forge').catch(() => {})
-    deductCredit(userId, 'javari_forge').catch(() => {})
+    // ── Post-success deduction ──────────────────────────────────────────────
+    if (userId) {
+      trackUsage(userId, 'javari_forge').catch(() => {})
+      deductCredits(userId, ROUTE_COST, 'javari_forge').catch(() => {})
+    }
 
     return NextResponse.json({
       code,
       explanation,
       language,
-      model:    result.model,
-      provider: result.provider,
-      tier:     result.tier,
-      cost:     result.cost,
+      model:        result.model,
+      provider:     result.provider,
+      tier:         result.tier,
+      cost:         result.cost,
+      credits_used: ROUTE_COST,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -100,10 +107,11 @@ export async function POST(req: NextRequest) {
 
 export async function GET() {
   return NextResponse.json({
-    service:  'Javari Forge',
-    version:  '1.0',
-    endpoint: 'POST /api/javari/forge',
-    params:   ['prompt (required)', 'language (default: typescript)', 'context', 'userId'],
-    limits:   { free: '5/day', pro: '100/day', power: 'unlimited' },
+    service:      'Javari Forge',
+    version:      '1.1',
+    endpoint:     'POST /api/javari/forge',
+    params:       ['prompt (required)', 'language (default: typescript)', 'context', 'userId'],
+    credits_cost: ROUTE_COST,
+    limits:       { free: '5/day', pro: '100/day', premium: '500/day' },
   })
 }

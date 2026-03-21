@@ -3,13 +3,13 @@
 // First-turn: neutral open greeting, no assumed context.
 // Subsequent turns: adapt to user intent.
 // Billing gate: free tier = 10 requests/day.
-// Credit check: deduct 1 credit per successful non-first-turn request.
-// Tuesday, March 17, 2026 | Updated: Thursday, March 19, 2026
+// Credit cost: 1 credit per non-first-turn message (CREDIT_COSTS.javari_chat).
+// Updated: March 21, 2026 — Credit enforcement audit.
 import { NextRequest, NextResponse } from 'next/server'
 import { route }          from '@/lib/javari/model-router'
 import { detectTaskType } from '@/lib/javari/router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
-import { getCreditBalance, deductCredit } from '@/lib/billing/credits'
+import { getCreditBalance, deductCredits, CREDIT_COSTS } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
 
@@ -29,6 +29,8 @@ const SYSTEM_CONTEXTUAL = [
   'Adapt your response to what the user actually needs.',
   'Do not assume internal context unless the user has explicitly provided it.',
 ].join('\n')
+
+const ROUTE_COST = CREDIT_COSTS.javari_chat  // 1 credit
 
 export async function POST(req: NextRequest) {
   try {
@@ -62,12 +64,14 @@ export async function POST(req: NextRequest) {
         }, { status: 402 })
       }
 
-      // ── Credit balance check ──────────────────────────────────────────────
+      // ── Credit balance check (pre-execution, exact cost) ──────────────────
       const balance = await getCreditBalance(userId)
-      if (balance <= 0) {
+      if (balance < ROUTE_COST) {
         return NextResponse.json({
           error:       'no_credits',
-          message:     'You are out of credits. Please upgrade.',
+          message:     `This action costs ${ROUTE_COST} credit${ROUTE_COST !== 1 ? 's' : ''}. You have ${balance}. Please upgrade.`,
+          required:    ROUTE_COST,
+          available:   balance,
           upgrade_url: '/pricing',
         }, { status: 402 })
       }
@@ -82,20 +86,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
     }
 
-    // ── Post-success tracking (fire-and-forget, only on success) ──────────
+    // ── Post-success deduction (fire-and-forget, only on success) ─────────
     if (!isFirstTurn) {
       trackUsage(userId, 'javari_chat').catch(() => {})
-      deductCredit(userId, 'javari_chat').catch(() => {})
+      deductCredits(userId, ROUTE_COST, 'javari_chat').catch(() => {})
     }
 
     return NextResponse.json({
-      content:  result.content,
-      model:    result.model,
-      provider: result.provider,
-      tier:     result.tier,
-      taskType: result.taskType,
-      cost:     result.cost,
-      attempts: result.attempts,
+      content:      result.content,
+      model:        result.model,
+      provider:     result.provider,
+      tier:         result.tier,
+      taskType:     result.taskType,
+      cost:         result.cost,
+      attempts:     result.attempts,
+      credits_used: ROUTE_COST,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'

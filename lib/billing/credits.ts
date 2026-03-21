@@ -1,7 +1,7 @@
 // lib/billing/credits.ts
 // Credit consumption helpers — check balance and deduct on successful use.
 // Calls craudiovizai.com as central billing authority.
-// Updated: March 21, 2026 — Final safety lock (enforcePrecheck, idempotency, PRECHECK log).
+// Updated: March 21, 2026 — Controlled fail-open (SAFE_FALLBACK_CREDITS).
 //
 // COST ARCHITECTURE
 // -----------------
@@ -21,19 +21,38 @@
 //   image       : ×10  (DALL-E, Flux, SDXL)
 //
 // ROUTE CEILINGS (pre-execution worst-case checks):
-//   chat  → standard  (1 × 2 =  2)
-//   forge → standard  (3 × 2 =  6)
-//   team  → multi_agent (5 × 5 = 25)  [always fixed, not dynamic]
+//   chat  → standard    (1 × 2 =  2cr)
+//   forge → standard    (3 × 2 =  6cr)
+//   team  → multi_agent (5 × 5 = 25cr)  [always fixed]
 //
-// SAFETY RULES (all enforced in enforcePrecheck):
-//   1. balance < required    → block
-//   2. balance - required < 0 → block  (explicit no-negative double-check)
-//   3. PRECHECK log emitted before every execution attempt
-//   4. Idempotency key on every deduction — same requestId cannot deduct twice
+// FAIL-OPEN POLICY (billing service unreachable):
+//   Balance reported as SAFE_FALLBACK_CREDITS (10) — NOT Infinity.
+//   Routes costing ≤ 10cr: allowed.
+//   Routes costing  > 10cr OR type = multi_agent/reasoning: BLOCKED.
+//   Error logged: BILLING_UNAVAILABLE_FALLBACK.
+//   This prevents abuse during outages while keeping cheap routes usable.
+//
+// SAFETY RULES:
+//   1. balance < required         → block
+//   2. balance - required < 0    → block  (no-negative double-check)
+//   3. fallback + multi_agent    → block  (too expensive to risk)
+//   4. fallback + reasoning      → block  (too expensive to risk)
+//   5. PRECHECK log on every attempt
+//   6. Idempotency key on every deduction
 
 import { randomUUID } from 'crypto'
 
 const BILLING_BASE = process.env.BILLING_SERVICE_URL ?? 'https://craudiovizai.com'
+
+// ── Fail-open budget ──────────────────────────────────────────────────────────
+// When billing is unreachable, users get exactly this many credits.
+// Set to cover chat (1-2cr) and forge (3-6cr) but not team (25cr).
+// Must be a positive integer. Never Infinity.
+export const SAFE_FALLBACK_CREDITS = 10
+
+// ── Model types blocked during billing outage ─────────────────────────────────
+// These are too expensive to run without a confirmed real balance.
+const FALLBACK_BLOCKED_MODEL_TYPES = new Set<ModelCostType>(['multi_agent', 'reasoning', 'image'])
 
 // ── Base cost constants ───────────────────────────────────────────────────────
 export const CREDIT_COSTS = {
@@ -56,14 +75,14 @@ export const MODEL_COST_MULTIPLIER = {
 
 export type ModelCostType = keyof typeof MODEL_COST_MULTIPLIER
 
-// ── Route ceiling map — authoritative pre-check ceilings per route ────────────
-// Each entry is the worst-case ModelCostType for that route.
+// ── Route ceiling map ─────────────────────────────────────────────────────────
+// Authoritative worst-case ModelCostType per route.
 // Routes must never exceed their declared ceiling.
 export const ROUTE_CEILING: Record<CreditSource, ModelCostType> = {
-  javari_chat:   'standard',    // chat caps at moderate tier
-  javari_forge:  'standard',    // forge caps at moderate tier (maxTier:'moderate')
-  javari_team:   'multi_agent', // team is always multi_agent — no dynamic escalation
-  javari_worker: 'cheap',       // worker is exempt; ceiling is notional only
+  javari_chat:   'standard',    // caps at moderate tier
+  javari_forge:  'standard',    // caps at moderate tier (maxTier:'moderate')
+  javari_team:   'multi_agent', // always multi_agent — no dynamic escalation
+  javari_worker: 'cheap',       // exempt; ceiling is notional
 }
 
 // ── Tier → ModelCostType ──────────────────────────────────────────────────────
@@ -73,7 +92,7 @@ export function tierToModelCostType(tier: string): ModelCostType {
     case 'low':       return 'cheap'
     case 'moderate':  return 'standard'
     case 'expensive': return 'reasoning'
-    default:          return 'cheap'  // fail safe — unknown tier never overcharges
+    default:          return 'cheap'  // unknown tier never overcharges
   }
 }
 
@@ -95,103 +114,155 @@ export function computeCreditCost(source: CreditSource, modelType: ModelCostType
   return total
 }
 
-// ── Pre-execution safety check (logs PRECHECK, enforces no-negative) ──────────
+// ── Balance result type ───────────────────────────────────────────────────────
+// Separates real balance from fallback state.
+// fallback: true means billing was unreachable — balance is SAFE_FALLBACK_CREDITS.
+// fallback: false means balance is confirmed real.
+interface BalanceResult {
+  balance:  number
+  fallback: boolean
+}
+
+// ── Internal: balance fetch with explicit fallback flag ───────────────────────
+async function getCreditBalanceWithFallback(userId: string): Promise<BalanceResult> {
+  try {
+    const res = await fetch(
+      `${BILLING_BASE}/api/billing/usage?userId=${encodeURIComponent(userId)}&feature=credits`,
+      { method: 'GET', signal: AbortSignal.timeout(3000) }
+    )
+
+    if (!res.ok) {
+      // HTTP error from billing service — treat as unavailable
+      console.error('BILLING_UNAVAILABLE_FALLBACK', {
+        userId:    userId.slice(0, 8) + '…',
+        reason:    `billing service HTTP ${res.status}`,
+        fallback:  SAFE_FALLBACK_CREDITS,
+        timestamp: new Date().toISOString(),
+      })
+      return { balance: SAFE_FALLBACK_CREDITS, fallback: true }
+    }
+
+    const data = await res.json() as { month?: Record<string, number> }
+    const balance = Math.max(0, data.month?.credits ?? 0)
+    return { balance, fallback: false }
+
+  } catch (err) {
+    // Network error, timeout, DNS failure — treat as unavailable
+    const reason = err instanceof Error ? err.message : String(err)
+    console.error('BILLING_UNAVAILABLE_FALLBACK', {
+      userId:    userId.slice(0, 8) + '…',
+      reason,
+      fallback:  SAFE_FALLBACK_CREDITS,
+      timestamp: new Date().toISOString(),
+    })
+    return { balance: SAFE_FALLBACK_CREDITS, fallback: true }
+  }
+}
+
+// ── Public: balance check ─────────────────────────────────────────────────────
+// Returns Infinity only when userId is absent (unauthed — always allow).
+// Returns SAFE_FALLBACK_CREDITS (not Infinity) when billing is unreachable.
+// Returns confirmed real balance when billing is healthy.
+export async function getCreditBalance(
+  userId: string | null | undefined,
+): Promise<number> {
+  if (!userId) return Infinity  // unauthenticated — allow through, no billing needed
+
+  const { balance } = await getCreditBalanceWithFallback(userId)
+  return balance
+}
+
+// ── Pre-execution safety check (logs PRECHECK) ────────────────────────────────
 export type PrecheckResult =
-  | { allowed: true;  balance: number; required: number; requestId: string }
-  | { allowed: false; balance: number; required: number; reason: 'insufficient' | 'would_go_negative' | 'billing_unavailable' }
+  | { allowed: true;  balance: number; required: number; requestId: string; fallback: boolean }
+  | { allowed: false; balance: number; required: number; fallback: boolean;
+      reason: 'insufficient' | 'would_go_negative' | 'billing_unavailable' }
 
 /**
  * enforcePrecheck — MUST be called before every execution attempt.
  *
- * Checks:
- *   1. balance >= required         (primary guard)
- *   2. balance - required >= 0     (explicit no-negative double-check)
+ * Checks (in order):
+ *   1. During billing fallback: block multi_agent + reasoning routes
+ *   2. balance >= required
+ *   3. balance - required >= 0  (no-negative double-check)
  *
- * Emits PRECHECK log regardless of outcome — every attempt is traceable.
- * Returns a typed result; routes must check `allowed` before proceeding.
- * Returns a unique requestId on success — pass to deductCredits for idempotency.
+ * Emits PRECHECK log on every call regardless of outcome.
+ * Returns requestId on allow — pass to deductCredits for idempotency.
  *
- * If userId is absent: allowed = true, requestId = 'anon-{uuid}'.
- * If billing service is unreachable: allowed = true (fail open — never block users).
+ * Fallback behaviour (billing unreachable):
+ *   - cheap/standard routes: allowed if cost ≤ SAFE_FALLBACK_CREDITS
+ *   - multi_agent/reasoning/image routes: always blocked
  */
 export async function enforcePrecheck(
   userId: string | null | undefined,
   source: CreditSource,
-  modelCostType?: ModelCostType,  // if omitted, uses ROUTE_CEILING[source]
+  modelCostType?: ModelCostType,
 ): Promise<PrecheckResult> {
-  const costType = modelCostType ?? ROUTE_CEILING[source]
-  const required = computeCreditCost(source, costType)
+  const costType  = modelCostType ?? ROUTE_CEILING[source]
+  const required  = computeCreditCost(source, costType)
   const requestId = userId
     ? `${source.replace('javari_', '')}-${Date.now()}-${randomUUID().slice(0, 8)}`
     : `anon-${randomUUID().slice(0, 8)}`
 
-  // No userId — allow, no balance fetch needed
+  // ── No userId: unauthenticated request — allow unconditionally ────────────
   if (!userId) {
     console.log('PRECHECK', {
       route:     source,
       required,
       balance:   'anon',
       allowed:   true,
+      fallback:  false,
       requestId,
       timestamp: new Date().toISOString(),
     })
-    return { allowed: true, balance: Infinity, required, requestId }
+    return { allowed: true, balance: Infinity, required, requestId, fallback: false }
   }
 
-  const balance = await getCreditBalance(userId)
+  // ── Fetch balance with fallback flag ──────────────────────────────────────
+  const { balance, fallback } = await getCreditBalanceWithFallback(userId)
 
-  // Billing service unreachable returns Infinity — fail open, log it
-  const billingUnavailable = balance === Infinity
-  const effectiveBalance   = billingUnavailable ? Infinity : balance
+  // ── Fallback mode: enforce cheap-only policy ──────────────────────────────
+  // If billing is down, block expensive route types regardless of balance.
+  // We cannot risk authorizing a multi_agent or reasoning run without a
+  // confirmed real balance — the fallback budget of 10cr doesn't cover them.
+  if (fallback && FALLBACK_BLOCKED_MODEL_TYPES.has(costType)) {
+    console.log('PRECHECK', {
+      route:     source,
+      required,
+      balance,
+      allowed:   false,
+      fallback:  true,
+      reason:    'billing_unavailable',
+      model_type: costType,
+      requestId,
+      timestamp: new Date().toISOString(),
+    })
+    return { allowed: false, balance, required, fallback: true, reason: 'billing_unavailable' }
+  }
 
+  // ── Log PRECHECK with full context ────────────────────────────────────────
+  const wouldAllow = balance >= required && balance - required >= 0
   console.log('PRECHECK', {
-    route:               source,
+    route:      source,
     required,
-    balance:             billingUnavailable ? 'billing_unavailable' : balance,
-    allowed:             billingUnavailable ? true : effectiveBalance >= required && effectiveBalance - required >= 0,
+    balance,
+    allowed:    wouldAllow,
+    fallback,
     requestId,
-    billing_unavailable: billingUnavailable,
-    timestamp:           new Date().toISOString(),
+    timestamp:  new Date().toISOString(),
   })
 
-  if (billingUnavailable) {
-    // Fail open — billing errors never block execution
-    return { allowed: true, balance: Infinity, required, requestId }
+  // ── Guard 1: primary insufficiency ───────────────────────────────────────
+  if (balance < required) {
+    return { allowed: false, balance, required, fallback, reason: 'insufficient' }
   }
 
-  // Guard 1: primary insufficiency check
-  if (effectiveBalance < required) {
-    return { allowed: false, balance: effectiveBalance, required, reason: 'insufficient' }
+  // ── Guard 2: explicit no-negative double-check ────────────────────────────
+  if (balance - required < 0) {
+    return { allowed: false, balance, required, fallback, reason: 'would_go_negative' }
   }
 
-  // Guard 2: explicit no-negative double-check
-  // This catches floating-point edge cases and any scenario where
-  // guard 1 could theoretically pass while the result would still go negative.
-  if (effectiveBalance - required < 0) {
-    return { allowed: false, balance: effectiveBalance, required, reason: 'would_go_negative' }
-  }
-
-  return { allowed: true, balance: effectiveBalance, required, requestId }
-}
-
-// ── Balance check (raw, non-blocking) ─────────────────────────────────────────
-export async function getCreditBalance(
-  userId: string | null | undefined,
-): Promise<number> {
-  if (!userId) return Infinity
-
-  try {
-    const res = await fetch(
-      `${BILLING_BASE}/api/billing/usage?userId=${encodeURIComponent(userId)}&feature=credits`,
-      { method: 'GET', signal: AbortSignal.timeout(3000) }
-    )
-    if (!res.ok) return Infinity
-
-    const data = await res.json() as { month?: Record<string, number> }
-    return Math.max(0, data.month?.credits ?? 0)
-  } catch {
-    return Infinity  // network error — fail open
-  }
+  return { allowed: true, balance, required, requestId, fallback }
 }
 
 // ── Deduction (fire-and-forget, idempotency-keyed) ───────────────────────────
@@ -199,11 +270,10 @@ export async function getCreditBalance(
  * Deduct credits after confirmed successful execution.
  * Fire-and-forget — never throws.
  *
- * @param userId      - user (no-op if falsy or cost=0)
- * @param cost        - exact cost from computeCreditCost() — never a magic number
- * @param source      - named route for audit trail
- * @param requestId   - idempotency key from enforcePrecheck() — prevents double-charge
- *                      If absent a new UUID is generated (allows deduction but loses idempotency).
+ * @param userId    - user (no-op if falsy or cost=0)
+ * @param cost      - exact cost from computeCreditCost() — never a magic number
+ * @param source    - named route for audit trail
+ * @param requestId - idempotency key from enforcePrecheck() — prevents double-charge
  */
 export async function deductCredits(
   userId: string | null | undefined,
@@ -217,11 +287,11 @@ export async function deductCredits(
   const key = requestId ?? `fallback-${randomUUID()}`
 
   console.log('CREDITS_USED', {
-    route:      source,
+    route:     source,
     cost,
-    requestId:  key,
-    userId:     userId.slice(0, 8) + '…',  // partial ID — never full PII
-    timestamp:  new Date().toISOString(),
+    requestId: key,
+    userId:    userId.slice(0, 8) + '…',
+    timestamp: new Date().toISOString(),
   })
 
   try {
@@ -230,13 +300,13 @@ export async function deductCredits(
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({
         userId,
-        feature:          'credits',
-        count:            -cost,
+        feature:  'credits',
+        count:    -cost,
         metadata: {
           type:           'usage',
           source,
           cost,
-          idempotencyKey: key,  // billing authority uses this to deduplicate
+          idempotencyKey: key,
         },
       }),
       signal: AbortSignal.timeout(3000),
@@ -247,8 +317,8 @@ export async function deductCredits(
 }
 
 // ── Legacy compatibility shim ──────────────────────────────────────────────────
-// Routes that haven't migrated to enforcePrecheck() yet can still call this.
-// It does NOT emit PRECHECK or enforce no-negative — migrate routes as you go.
+// Migrate callers to enforcePrecheck() when possible.
+// Includes no-negative check; does NOT emit PRECHECK or enforce fallback policy.
 export async function hasSufficientCredits(
   userId: string | null | undefined,
   required: number,

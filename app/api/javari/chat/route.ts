@@ -3,7 +3,8 @@
 // Dynamic credit cost: base(1) × MODEL_COST_MULTIPLIER[tier].
 // Ceiling: standard (×2) = 2 credits max. Actual charge from result.tier.
 // Safety lock: enforcePrecheck() before every execution. Idempotency key on deduction.
-// Updated: March 21, 2026 — Final safety lock.
+// Upsell: computes and returns upsell payload when balance low or request blocked.
+// Updated: March 21, 2026 — Credit pack upsell system.
 import { NextRequest, NextResponse } from 'next/server'
 import { route }          from '@/lib/javari/model-router'
 import { detectTaskType } from '@/lib/javari/router'
@@ -14,6 +15,7 @@ import {
   computeCreditCost,
   tierToModelCostType,
 } from '@/lib/billing/credits'
+import { computeUpsell, type UpsellResult } from '@/lib/billing/upsell'
 
 export const dynamic = 'force-dynamic'
 
@@ -37,10 +39,11 @@ const SYSTEM_CONTEXTUAL = [
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { message, history, userId } = body as {
-      message:  string
-      history?: Array<{ role: string; content: string }>
-      userId?:  string
+    const { message, history, userId, userTier = 'free' } = body as {
+      message:   string
+      history?:  Array<{ role: string; content: string }>
+      userId?:   string
+      userTier?: string   // caller passes tier from their auth context
     }
 
     if (!message?.trim()) {
@@ -49,8 +52,8 @@ export async function POST(req: NextRequest) {
 
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn       = priorUserMessages.length === 0
-
-    let precheckRequestId: string | undefined
+    let precheckRequestId:  string | undefined
+    let precheckBalance:    number = Infinity
 
     // First turn always free — greetings skip all gates and billing
     if (!isFirstTurn && userId) {
@@ -65,13 +68,14 @@ export async function POST(req: NextRequest) {
           tier:        gate.tier,
           used:        gate.used,
           limit:       gate.limit,
+          upsell:      computeUpsell(0, userTier, true),
         }, { status: 402 })
       }
 
-      // ── enforcePrecheck — ceiling: standard (worst case = 2 credits) ────
-      // Emits PRECHECK log. Checks balance >= required AND balance - required >= 0.
-      // Returns requestId used as idempotency key for deductCredits.
+      // ── enforcePrecheck ─────────────────────────────────────────────────
       const precheck = await enforcePrecheck(userId, 'javari_chat')
+      precheckBalance = precheck.balance  // capture for post-success upsell
+
       if (!precheck.allowed) {
         return NextResponse.json({
           error:       'no_credits',
@@ -80,6 +84,7 @@ export async function POST(req: NextRequest) {
           available:   precheck.balance,
           reason:      precheck.reason,
           upgrade_url: '/pricing',
+          upsell:      computeUpsell(precheck.balance, userTier, true),
         }, { status: 402 })
       }
       precheckRequestId = precheck.requestId
@@ -88,23 +93,28 @@ export async function POST(req: NextRequest) {
     const systemPrompt = isFirstTurn ? SYSTEM_FIRST : SYSTEM_CONTEXTUAL
     const taskType     = isFirstTurn ? 'chat' : (detectTaskType(message) as any)
 
-    // ── Execute AI ──────────────────────────────────────────────────────────
     const result = await route(taskType, message, { systemPrompt })
 
     if (result.blocked) {
       return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
     }
 
-    // ── Post-success: compute actual cost from real tier, deduct once ──────
     let creditsCharged = 0
+    let upsell: UpsellResult = { show: false }
+
     if (!isFirstTurn) {
       const modelType  = tierToModelCostType(result.tier)
       creditsCharged   = computeCreditCost('javari_chat', modelType)
-      // COST_CALC logged inside computeCreditCost
-
       trackUsage(userId, 'javari_chat').catch(() => {})
-      // Pass requestId — billing authority deduplicates on this key
       deductCredits(userId, creditsCharged, 'javari_chat', precheckRequestId).catch(() => {})
+
+      // ── Post-success upsell: balance after deduction ──────────────────
+      // precheckBalance was confirmed just before execution.
+      // Subtract creditsCharged for accurate post-deduction estimate.
+      if (userId && precheckBalance !== Infinity) {
+        const balanceAfter = Math.max(0, precheckBalance - creditsCharged)
+        upsell = computeUpsell(balanceAfter, userTier, false)
+      }
     }
 
     return NextResponse.json({
@@ -116,6 +126,7 @@ export async function POST(req: NextRequest) {
       cost:         result.cost,
       attempts:     result.attempts,
       credits_used: creditsCharged,
+      upsell,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'

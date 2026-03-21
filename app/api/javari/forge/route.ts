@@ -3,7 +3,8 @@
 // Dynamic credit cost: base(3) × MODEL_COST_MULTIPLIER[tier].
 // Ceiling: standard (×2) = 6 credits max.
 // Safety lock: enforcePrecheck() before execution. Idempotency key on deduction.
-// Updated: March 21, 2026 — Final safety lock.
+// Upsell: computes and returns upsell payload when balance low or request blocked.
+// Updated: March 21, 2026 — Credit pack upsell system.
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
@@ -15,6 +16,7 @@ import {
   CREDIT_COSTS,
   MODEL_COST_MULTIPLIER,
 } from '@/lib/billing/credits'
+import { computeUpsell, type UpsellResult } from '@/lib/billing/upsell'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,11 +32,12 @@ const SYSTEM_FORGE = [
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
-    const { prompt, language = 'typescript', context, userId } = body as {
+    const { prompt, language = 'typescript', context, userId, userTier = 'free' } = body as {
       prompt:    string
       language?: string
       context?:  string
       userId?:   string
+      userTier?: string
     }
 
     if (!prompt?.trim()) {
@@ -42,6 +45,7 @@ export async function POST(req: NextRequest) {
     }
 
     let precheckRequestId: string | undefined
+    let precheckBalance:   number = Infinity
 
     if (userId) {
       // ── Daily rate gate ─────────────────────────────────────────────────
@@ -54,12 +58,14 @@ export async function POST(req: NextRequest) {
           tier:        gate.tier,
           used:        gate.used,
           limit:       gate.limit,
+          upsell:      computeUpsell(0, userTier, true),
         }, { status: 402 })
       }
 
-      // ── enforcePrecheck — ceiling: standard (worst case = 6 credits) ────
-      // Emits PRECHECK log. Enforces no-negative guard. Returns requestId.
+      // ── enforcePrecheck ─────────────────────────────────────────────────
       const precheck = await enforcePrecheck(userId, 'javari_forge')
+      precheckBalance = precheck.balance
+
       if (!precheck.allowed) {
         return NextResponse.json({
           error:       'no_credits',
@@ -68,6 +74,7 @@ export async function POST(req: NextRequest) {
           available:   precheck.balance,
           reason:      precheck.reason,
           upgrade_url: '/pricing',
+          upsell:      computeUpsell(precheck.balance, userTier, true),
         }, { status: 402 })
       }
       precheckRequestId = precheck.requestId
@@ -79,7 +86,6 @@ export async function POST(req: NextRequest) {
       `Task:\n${prompt}`,
     ].filter(Boolean).join('\n\n')
 
-    // ── Execute AI ──────────────────────────────────────────────────────────
     const result = await route('coding', fullPrompt, {
       systemPrompt: SYSTEM_FORGE,
       maxTier:      'moderate',
@@ -93,14 +99,19 @@ export async function POST(req: NextRequest) {
     const code        = parts[0]?.trim() ?? result.content
     const explanation = parts[1]?.trim() ?? ''
 
-    // ── Post-success: actual tier determines final cost ─────────────────────
     let creditsCharged = 0
+    let upsell: UpsellResult = { show: false }
+
     if (userId) {
       const modelType  = tierToModelCostType(result.tier)
       creditsCharged   = computeCreditCost('javari_forge', modelType)
-
       trackUsage(userId, 'javari_forge').catch(() => {})
       deductCredits(userId, creditsCharged, 'javari_forge', precheckRequestId).catch(() => {})
+
+      if (precheckBalance !== Infinity) {
+        const balanceAfter = Math.max(0, precheckBalance - creditsCharged)
+        upsell = computeUpsell(balanceAfter, userTier, false)
+      }
     }
 
     return NextResponse.json({
@@ -112,6 +123,7 @@ export async function POST(req: NextRequest) {
       tier:         result.tier,
       cost:         result.cost,
       credits_used: creditsCharged,
+      upsell,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
@@ -122,9 +134,9 @@ export async function POST(req: NextRequest) {
 export async function GET() {
   return NextResponse.json({
     service:  'Javari Forge',
-    version:  '1.3',
+    version:  '1.4',
     endpoint: 'POST /api/javari/forge',
-    params:   ['prompt (required)', 'language (default: typescript)', 'context', 'userId'],
+    params:   ['prompt (required)', 'language', 'context', 'userId', 'userTier'],
     pricing: {
       base_cost:   CREDIT_COSTS.javari_forge,
       ceiling:     `standard (×${MODEL_COST_MULTIPLIER.standard})`,

@@ -1,19 +1,18 @@
 // app/api/javari/chat/route.ts
 // Javari Chat API — customer-facing AI assistant.
 // Dynamic credit cost: base(1) × MODEL_COST_MULTIPLIER[tier].
-// First-turn free. Subsequent turns priced by actual model used.
-// Updated: March 21, 2026 — Dynamic cost model.
+// Ceiling: standard (×2) = 2 credits max. Actual charge from result.tier.
+// Safety lock: enforcePrecheck() before every execution. Idempotency key on deduction.
+// Updated: March 21, 2026 — Final safety lock.
 import { NextRequest, NextResponse } from 'next/server'
 import { route }          from '@/lib/javari/model-router'
 import { detectTaskType } from '@/lib/javari/router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
 import {
-  getCreditBalance,
+  enforcePrecheck,
   deductCredits,
   computeCreditCost,
   tierToModelCostType,
-  CREDIT_COSTS,
-  MODEL_COST_MULTIPLIER,
 } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
@@ -35,14 +34,6 @@ const SYSTEM_CONTEXTUAL = [
   'Do not assume internal context unless the user has explicitly provided it.',
 ].join('\n')
 
-// Base cost — multiplied by actual model tier after route() returns
-const BASE_COST = CREDIT_COSTS.javari_chat  // 1
-
-// Pre-execution ceiling check: worst-case cost = base × standard (×2)
-// We block if the user can't afford the MAX possible tier for this route.
-// If the router uses a cheaper model, the final charge will be lower.
-const MAX_POSSIBLE_COST = BASE_COST * MODEL_COST_MULTIPLIER.standard  // 2
-
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json()
@@ -59,7 +50,9 @@ export async function POST(req: NextRequest) {
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn       = priorUserMessages.length === 0
 
-    // First turn always free — greetings never gate or consume credits
+    let precheckRequestId: string | undefined
+
+    // First turn always free — greetings skip all gates and billing
     if (!isFirstTurn && userId) {
 
       // ── Daily rate gate ─────────────────────────────────────────────────
@@ -75,39 +68,43 @@ export async function POST(req: NextRequest) {
         }, { status: 402 })
       }
 
-      // ── Pre-execution credit check — worst-case cost ──────────────────
-      const balance = await getCreditBalance(userId)
-      if (balance < MAX_POSSIBLE_COST) {
+      // ── enforcePrecheck — ceiling: standard (worst case = 2 credits) ────
+      // Emits PRECHECK log. Checks balance >= required AND balance - required >= 0.
+      // Returns requestId used as idempotency key for deductCredits.
+      const precheck = await enforcePrecheck(userId, 'javari_chat')
+      if (!precheck.allowed) {
         return NextResponse.json({
-          error:        'no_credits',
-          message:      `Chat requires up to ${MAX_POSSIBLE_COST} credits. You have ${balance}. Please upgrade.`,
-          required:     MAX_POSSIBLE_COST,
-          available:    balance,
-          upgrade_url:  '/pricing',
+          error:       'no_credits',
+          message:     `Chat requires up to ${precheck.required} credits. You have ${precheck.balance}. Please upgrade.`,
+          required:    precheck.required,
+          available:   precheck.balance,
+          reason:      precheck.reason,
+          upgrade_url: '/pricing',
         }, { status: 402 })
       }
+      precheckRequestId = precheck.requestId
     }
 
     const systemPrompt = isFirstTurn ? SYSTEM_FIRST : SYSTEM_CONTEXTUAL
     const taskType     = isFirstTurn ? 'chat' : (detectTaskType(message) as any)
 
+    // ── Execute AI ──────────────────────────────────────────────────────────
     const result = await route(taskType, message, { systemPrompt })
 
     if (result.blocked) {
       return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
     }
 
-    // ── Dynamic cost calculation based on actual model tier used ──────────
-    // route() returns the real tier (low/moderate/expensive).
-    // We compute the cost NOW — after we know what model was actually used.
+    // ── Post-success: compute actual cost from real tier, deduct once ──────
     let creditsCharged = 0
     if (!isFirstTurn) {
-      const modelType    = tierToModelCostType(result.tier)
-      creditsCharged     = computeCreditCost('javari_chat', modelType)
-      // computeCreditCost already logs COST_CALC
+      const modelType  = tierToModelCostType(result.tier)
+      creditsCharged   = computeCreditCost('javari_chat', modelType)
+      // COST_CALC logged inside computeCreditCost
 
       trackUsage(userId, 'javari_chat').catch(() => {})
-      deductCredits(userId, creditsCharged, 'javari_chat').catch(() => {})
+      // Pass requestId — billing authority deduplicates on this key
+      deductCredits(userId, creditsCharged, 'javari_chat', precheckRequestId).catch(() => {})
     }
 
     return NextResponse.json({

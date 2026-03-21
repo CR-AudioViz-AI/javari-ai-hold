@@ -1,17 +1,17 @@
 // app/api/javari/team/route.ts
 // Javari Team API — multi-model ensemble (planner → builder → validator).
-// Dynamic credit cost: base(5) × multi_agent(×5) = 25 credits.
-// Team is ALWAYS multi_agent — 3 sequential AI calls, no exceptions.
-// Pre-check 25 credits before first model call. Deduct once after full success.
-// Updated: March 21, 2026 — Dynamic cost model.
+// Fixed cost: base(5) × multi_agent(×5) = 25 credits. No dynamic adjustment.
+// Ceiling = actual cost for team — pre-check and post-deduction use same value.
+// Safety lock: enforcePrecheck() before first model call. Idempotency key on deduction.
+// Retry protection: each POST is one attempt. No internal retry loop here.
+// Updated: March 21, 2026 — Final safety lock.
 import { NextRequest, NextResponse } from 'next/server'
 import { route } from '@/lib/javari/model-router'
 import { checkGate, trackUsage } from '@/lib/billing/gate'
 import {
-  getCreditBalance,
+  enforcePrecheck,
   deductCredits,
   computeCreditCost,
-  CREDIT_COSTS,
 } from '@/lib/billing/credits'
 
 export const dynamic = 'force-dynamic'
@@ -30,9 +30,8 @@ const SYSTEM = [
   'Be precise, direct, and adapt to what the user actually needs.',
 ].join('\n')
 
-// Team ALWAYS uses multi_agent — it runs 3 AI calls regardless of tier.
-// Route-level override: model type is fixed, not derived from result.tier.
-// base(5) × multi_agent(5) = 25 credits
+// Team cost is fixed — always multi_agent, always 25 credits.
+// computeCreditCost logs COST_CALC at module load.
 const ROUTE_COST = computeCreditCost('javari_team', 'multi_agent')  // 25
 
 export async function POST(req: NextRequest) {
@@ -51,7 +50,7 @@ export async function POST(req: NextRequest) {
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
     const isFirstTurn       = priorUserMessages.length === 0
 
-    // First turn: free greeting, skip all gates
+    // First turn: free greeting — no gate, no billing, no precheck
     if (isFirstTurn) {
       const result = await route('chat', message, { systemPrompt: SYSTEM_FIRST })
       return NextResponse.json({
@@ -63,6 +62,8 @@ export async function POST(req: NextRequest) {
         credits_used: 0,
       })
     }
+
+    let precheckRequestId: string | undefined
 
     if (userId) {
       // ── Daily rate gate ─────────────────────────────────────────────────
@@ -78,19 +79,26 @@ export async function POST(req: NextRequest) {
         }, { status: 402 })
       }
 
-      // ── Pre-execution credit check — full ensemble cost before first call ─
-      const balance = await getCreditBalance(userId)
-      if (balance < ROUTE_COST) {
+      // ── enforcePrecheck — ceiling: multi_agent (fixed = 25 credits) ──────
+      // For team, ceiling IS the cost. There is no post-execution adjustment.
+      // Emits PRECHECK log. Enforces both guards (< required, result < 0).
+      const precheck = await enforcePrecheck(userId, 'javari_team', 'multi_agent')
+      if (!precheck.allowed) {
         return NextResponse.json({
-          error:        'no_credits',
-          message:      `Team ensemble costs ${ROUTE_COST} credits (3 AI calls × multi-agent multiplier). You have ${balance}. Please upgrade.`,
-          required:     ROUTE_COST,
-          available:    balance,
-          upgrade_url:  '/pricing',
+          error:       'no_credits',
+          message:     `Team ensemble costs ${precheck.required} credits (3 AI calls × multi-agent multiplier). You have ${precheck.balance}. Please upgrade.`,
+          required:    precheck.required,
+          available:   precheck.balance,
+          reason:      precheck.reason,
+          upgrade_url: '/pricing',
         }, { status: 402 })
       }
+      precheckRequestId = precheck.requestId
     }
 
+    // ── Execute all 3 ensemble steps ────────────────────────────────────────
+    // No internal retry loop — each POST to this route is exactly one attempt.
+    // The route() function handles provider failover internally (not billable).
     const steps: { role: string; model: string; tier: string; content: string; cost: number }[] = []
 
     const plan = await route('planning',
@@ -111,10 +119,10 @@ export async function POST(req: NextRequest) {
     )
     steps.push({ role: 'validator', model: validate.model, tier: validate.tier, content: validate.content, cost: validate.cost })
 
-    // ── Single deduction: ROUTE_COST (25) after all 3 steps succeed ───────
+    // ── Post-success: single deduction of ROUTE_COST (25), idempotency-keyed ─
     if (userId) {
       trackUsage(userId, 'javari_team').catch(() => {})
-      deductCredits(userId, ROUTE_COST, 'javari_team').catch(() => {})
+      deductCredits(userId, ROUTE_COST, 'javari_team', precheckRequestId).catch(() => {})
     }
 
     return NextResponse.json({

@@ -6,6 +6,17 @@
     "silent": false,
     "autoJobCancelation": true
   },
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Content-Security-Policy",
+          "value": "frame-ancestors 'self' https://craudiovizai.com https://www.craudiovizai.com;"
+        }
+      ]
+    }
+  ],
   "crons": [
     {
       "path": "/api/autonomy/loop",

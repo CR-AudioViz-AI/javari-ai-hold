@@ -17,6 +17,30 @@ import {
 } from '@/lib/billing/credits'
 import { computeUpsell, type UpsellResult } from '@/lib/billing/upsell'
 
+// ── CORS — allow craudiovizai.com to call this route cross-origin ────────────
+const CORS_ORIGINS = [
+  'https://craudiovizai.com',
+  'https://www.craudiovizai.com',
+  'http://localhost:3000',
+]
+
+function corsHeaders(origin: string | null): Record<string, string> {
+  const allowed = origin && CORS_ORIGINS.some(o => origin.startsWith(o))
+  if (!allowed) return {}
+  return {
+    'Access-Control-Allow-Origin':      origin!,
+    'Access-Control-Allow-Methods':     'POST, OPTIONS',
+    'Access-Control-Allow-Headers':     'Content-Type, Authorization',
+    'Access-Control-Allow-Credentials': 'true',
+  }
+}
+
+export async function OPTIONS(req: NextRequest) {
+  const ch = corsHeaders(req.headers.get('origin'))
+  return new NextResponse(null, { status: 204, headers: ch })
+}
+
+
 export const dynamic = 'force-dynamic'
 
 const SYSTEM_FIRST = [
@@ -37,6 +61,8 @@ const SYSTEM_CONTEXTUAL = [
 ].join('\n')
 
 export async function POST(req: NextRequest) {
+  const _origin = req.headers.get('origin')
+  const _ch     = corsHeaders(_origin)
   try {
     const body = await req.json()
     const { message, history, userId, userTier = 'free' } = body as {
@@ -47,7 +73,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (!message?.trim()) {
-      return NextResponse.json({ error: 'message required' }, { status: 400 })
+      return NextResponse.json({ error: 'message required' }, { status: 400 }, headers: _ch })
     }
 
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
@@ -68,7 +94,7 @@ export async function POST(req: NextRequest) {
           tier:        gate.tier,
           used:        gate.used,
           limit:       gate.limit,
-          upsell:      computeUpsell(0, userTier, true),
+          upsell:      computeUpsell(0, userTier, true, { headers: _ch }),
         }, { status: 402 })
       }
 
@@ -84,7 +110,7 @@ export async function POST(req: NextRequest) {
           available:   precheck.balance,
           reason:      precheck.reason,
           upgrade_url: '/pricing',
-          upsell:      computeUpsell(precheck.balance, userTier, true),
+          upsell:      computeUpsell(precheck.balance, userTier, true, { headers: _ch }),
         }, { status: 402 })
       }
       precheckRequestId = precheck.requestId
@@ -96,7 +122,7 @@ export async function POST(req: NextRequest) {
     const result = await route(taskType, message, { systemPrompt })
 
     if (result.blocked) {
-      return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 })
+      return NextResponse.json({ error: result.reason, blocked: true }, { status: 429 }, headers: _ch })
     }
 
     let creditsCharged = 0
@@ -127,9 +153,9 @@ export async function POST(req: NextRequest) {
       attempts:     result.attempts,
       credits_used: creditsCharged,
       upsell,
-    })
+    }, { headers: _ch })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
-    return NextResponse.json({ error: msg }, { status: 500 })
+    return NextResponse.json({ error: msg }, { status: 500 }, headers: _ch })
   }
 }

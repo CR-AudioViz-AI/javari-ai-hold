@@ -3,13 +3,14 @@
 // TRUE 2×2 QUADRANT: grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr
 // Each quadrant = exactly 50% width × 50% height. No dominant panel.
 // Design: SCIF terminal / NORAD ops floor — deep black, glowing separators, phosphor status
-// Tuesday, March 17, 2026
+// Updated: March 22, 2026 — Auth wired: userId + Authorization header on all AI fetches
 'use client'
 
 import {
   useState, useRef, useEffect, useCallback
 } from 'react'
 import { Send, Zap, ChevronDown, RotateCcw } from 'lucide-react'
+import { createClientComponentClient } from '@supabase/auth-helpers-nextjs'
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -203,6 +204,12 @@ export default function JavariOSPage() {
   const [sysStatus,   setSysStatus]   = useState<SysStatus | null>(null)
   const [execPulse,   setExecPulse]   = useState(false)
 
+  // ── Auth session ──────────────────────────────────────────────────────────
+  const supabase    = createClientComponentClient()
+  const [userId,    setUserId]    = useState<string | null>(null)
+  const [authToken, setAuthToken] = useState<string | null>(null)
+  const [userTier,  setUserTier]  = useState<string>('free')
+
   const bottomRef  = useRef<HTMLDivElement>(null)
   const feedRef    = useRef<HTMLDivElement>(null)
   const textRef    = useRef<HTMLTextAreaElement>(null)
@@ -261,6 +268,16 @@ export default function JavariOSPage() {
     return () => clearInterval(t)
   }, [loadStatus])
 
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setUserId(session.user.id)
+        setAuthToken(session.access_token)
+        console.log('JAVARI_SESSION_LOADED', { userId: session.user.id.slice(0,8) })
+      }
+    })
+  }, [supabase])
+
   // ── Send message ───────────────────────────────────────────────────────────
   const send = useCallback(async (override?: string) => {
     const content = (override ?? input).trim()
@@ -282,9 +299,12 @@ export default function JavariOSPage() {
 
     try {
       if (mode === 'council') {
+        console.log('JAVARI_REQUEST_SENT', { route: '/api/javari/team', userId: userId?.slice(0,8) })
+        const teamHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (authToken) teamHeaders['Authorization'] = `Bearer ${authToken}`
         const res  = await fetch('/api/javari/team', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: content }),
+          method: 'POST', headers: teamHeaders,
+          body: JSON.stringify({ message: content, userId: userId ?? undefined, userTier }),
         })
         const data = await res.json()
         if (data.error) throw new Error(data.error)
@@ -315,12 +335,16 @@ export default function JavariOSPage() {
           }])
         }
       } else {
+        console.log('JAVARI_REQUEST_SENT', { route: '/api/javari/chat', userId: userId?.slice(0,8) })
+        const chatHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+        if (authToken) chatHeaders['Authorization'] = `Bearer ${authToken}`
         const res  = await fetch('/api/javari/chat', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ message: content }),
+          method: 'POST', headers: chatHeaders,
+          body: JSON.stringify({ message: content, history: messages.map(m => ({ role: m.role === 'agent' ? 'assistant' : m.role, content: m.content })), userId: userId ?? undefined, userTier }),
         })
         const data = await res.json()
         if (data.error || data.blocked) throw new Error(data.error ?? 'Blocked')
+        console.log('JAVARI_RESPONSE_RECEIVED', { route: '/api/javari/chat', model: data.model, credits_used: data.credits_used, upsell: data.upsell?.show })
         setAvState('responding')
         setMessages(m => [...m, {
           id: Date.now().toString(), role: 'assistant',

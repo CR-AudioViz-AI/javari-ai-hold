@@ -69,7 +69,7 @@ export async function POST(req: NextRequest) {
     }
 
     if (!message?.trim()) {
-      return NextResponse.json({ error: 'message required' }, { status: 400 }, headers: _ch })
+      return NextResponse.json({ error: 'message required' }, { status: 400, headers: _ch })
     }
 
     const priorUserMessages = (history ?? []).filter(m => m.role === 'user')
@@ -102,7 +102,7 @@ export async function POST(req: NextRequest) {
           tier:        gate.tier,
           used:        gate.used,
           limit:       gate.limit,
-          upsell:      computeUpsell(0, userTier, true, { headers: _ch }),
+          upsell:      computeUpsell(0, userTier, true),
         }, { status: 402 })
       }
 
@@ -118,7 +118,7 @@ export async function POST(req: NextRequest) {
           available:   precheck.balance,
           reason:      precheck.reason,
           upgrade_url: '/pricing',
-          upsell:      computeUpsell(precheck.balance, userTier, true, { headers: _ch }),
+          upsell:      computeUpsell(precheck.balance, userTier, true),
         }, { status: 402 })
       }
       precheckRequestId = precheck.requestId
@@ -159,13 +159,13 @@ export async function POST(req: NextRequest) {
       content:      validate.content,
       model:        validate.model,
       tier:         validate.tier,
-      total_cost:   steps.reduce((s, step, { headers: _ch }) => s + step.cost, 0),
+      total_cost:   steps.reduce((s, step) => s + step.cost, 0),
       ensemble:     steps,
       credits_used: ROUTE_COST,
       upsell,
     })
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
-    return NextResponse.json({ error: msg }, { status: 500 }, headers: _ch })
+    return NextResponse.json({ error: msg }, { status: 500, headers: _ch })
   }
 }
